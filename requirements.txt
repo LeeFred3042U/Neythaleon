@@ -1,13 +1,4 @@
 pandas
-sqlalchemy
 dotenv
-psycopg2
-geopandas
-matplotlib
-contextily
-folium
-shapely
-os
-time
-geoalchemy2
-
+sqlalchemy
+psutil
