@@ -2,3 +2,6 @@ pandas
 dotenv
 sqlalchemy
 psutil
+matplotlib
+seaborn
+
