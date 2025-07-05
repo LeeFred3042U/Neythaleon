@@ -13,7 +13,7 @@ import duckdb
 
 # Constants
 PARQUET_DIR = "./parquet_files"
-CHUNK_SIZE = 1000
+CHUNK_SIZE = 10000
 THROTTLE_DELAY = int(os.getenv("THROTTLE_DELAY", "5")) 
 LOG_FILE = "ingestion.log"
 METRICS_FILE = "metrics_log.csv"
@@ -68,8 +68,7 @@ def configure_logging() -> None:
     )
 
 
-def track_metrics(start_time: float, rows_processed: int) -> Dict[str, Any]:
-
+def track_metrics(start_time: float, rows_processed: int, num_columns: int) -> Dict[str, Any]:
     """Track and log performance metrics."""
     duration = time.time() - start_time
 
@@ -80,18 +79,35 @@ def track_metrics(start_time: float, rows_processed: int) -> Dict[str, Any]:
         "rows_per_second": rows_processed / duration if duration > 0 else 0,
         "cpu_usage": psutil.cpu_percent(interval=1),
         "batch_size": CHUNK_SIZE,
-        "memory_mb": psutil.virtual_memory().used / (1024 * 1024)
+        "memory_mb": psutil.virtual_memory().used / (1024 * 1024),
+        "columns_retained": num_columns
     }
 
     logging.info("Metrics: %s", metrics)
     return metrics
 
 
+def process_chunk(chunk: pd.DataFrame, null_threshold: float = 0.95, first_chunk: bool = False) -> (pd.DataFrame, int):
+    """
+    Drop columns with >null_threshold missing values.
+    Drop rows missing decimalLatitude and decimalLongitude.
+    """
+    original_cols = chunk.columns.tolist()
 
-def process_chunk(chunk: pd.DataFrame) -> pd.DataFrame:
+    # Drop columns with too many nulls
+    null_ratios = chunk.isnull().mean()
+    cols_to_keep = null_ratios[null_ratios <= null_threshold].index.tolist()
+    chunk = chunk[cols_to_keep]
 
-    """Remove rows missing lat/lon data."""
-    return chunk.dropna(subset=["decimalLatitude", "decimalLongitude"])
+    # Drop rows where lat/lon are missing
+    chunk = chunk.dropna(subset=["decimalLatitude", "decimalLongitude"])
+
+    if first_chunk:
+        dropped_cols = set(original_cols) - set(cols_to_keep)
+        logging.info("Dropped %d columns due to >%.0f%% nulls: %s", len(dropped_cols), null_threshold * 100, list(dropped_cols))
+        logging.info("Retained %d columns: %s", len(cols_to_keep), cols_to_keep)
+
+    return chunk, len(cols_to_keep)
 
 
 def insert_row(row: pd.Series, engine: Engine) -> bool:
@@ -125,11 +141,13 @@ def ingest_data(engine: Engine) -> Optional[List[Dict[str, Any]]]:
 
     try:
         chunks = stream_parquet_chunks(PARQUET_DIR, CHUNK_SIZE)
-        for chunk in chunks:
 
+        for i, chunk in enumerate(chunks):
             start_time = time.time()
-            processed_chunk = process_chunk(chunk)
+            processed_chunk, num_columns = process_chunk(chunk)
             rows_processed = len(processed_chunk)
+            metrics = track_metrics(start_time, rows_processed, num_columns)
+
 
             try:
                 processed_chunk.to_sql(
@@ -150,12 +168,29 @@ def ingest_data(engine: Engine) -> Optional[List[Dict[str, Any]]]:
                 )
                 total_rows += successful_rows
 
-            metrics_history.append(track_metrics(start_time, rows_processed))
+            metrics = track_metrics(start_time, rows_processed, len(processed_chunk.columns))
+            metrics_history.append(metrics)
+
+            # Save metrics immediately (append-safe)
+            pd.DataFrame([metrics]).to_csv(
+                METRICS_FILE,
+                mode="a",
+                header=not os.path.exists(METRICS_FILE),
+                index=False
+            )
+
             logging.info("Processed %s rows. Total: %s", rows_processed, total_rows)
             time.sleep(THROTTLE_DELAY)
 
+
         persist_metrics(metrics_history)
         logging.info("Ingestion complete. Total rows: %s", total_rows)
+
+        try:
+            con.close()
+        except Exception:
+            pass
+
         return metrics_history
 
     except Exception as e:
