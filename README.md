@@ -1,19 +1,22 @@
 # OceanScope
----
-# 🐙 OBIS Data Ingestion Script
 
-This Python script ingests a large TSV file (`occurrence.txt`) into a PostgreSQL-compatible database, logging key metrics along the way. It supports chunked ingestion, row-by-row fallbacks, performance tracking, and environmental configuration.
+OceanScope is a Python-based pipeline designed to ingest `.parquet` data from the Ocean Biodiversity Information System (OBIS) into a PostgreSQL-compatible database. It features chunked ingestion, automatic fallback for failed inserts, performance logging, and flexible environment configuration.
 
 ---
 
 ## 🚀 Features
 
-- Chunked reading and insertion for large files
-- Row-level fallback on chunk insert failure
-- Environment-based configuration with `.env`
-- CPU and ingestion speed metrics logged
-- Automatic retry/resume-safe architecture
-- PEP-8 compliant and production-ready logging
+- 🔄 **Chunked ingestion** of large `.parquet` datasets using DuckDB
+- 🧱 **Row-level fallback** on bulk insert failure
+- ⚙️ **Environment-based config** via `.env`
+- 📊 **Performance metrics**: CPU, memory, rows/sec, etc.
+- 🪵 **Structured logging** to both console and file
+
+---
+
+## 🧠 Architecture Summary
+
+The pipeline reads OBIS data in chunks using DuckDB, processes it with null/coordinate filters, and attempts to insert each chunk into a PostgreSQL table. If batch insertion fails, it retries each row individually. Performance metrics are tracked and logged for each chunk, with results saved to `metrics_log.csv`.
 
 ---
 
@@ -31,30 +34,39 @@ This Python script ingests a large TSV file (`occurrence.txt`) into a PostgreSQL
 
 - Python 3.8+
 - PostgreSQL or compatible DB
-- Dependencies:
-  - pandas
-  - sqlalchemy
-  - python-dotenv
-  - psutil
 
-Install requirements:
+---
 
+### Install requirements:
     
     pip install -r requirements.txt
 
-
-
-
----
-## License
-
-This work is licensed under a [Creative Commons Attribution (CC-BY 4.0) License](https://creativecommons.org/licenses/by/4.0/).
-
-Researchers using OceanScope should respect this rights statement and provide appropriate attribution when using any associated materials.
+Add --debug for verbose logging.
 
 ---
-### Dataset Attribution
 
-**Indian Ocean Marine Fauna Voucher Specimens Collections (CMLRE), Kochi, India.**  
-Version 1.0. Centre for Marine Living Resources & Ecology. Occurrence dataset (IndOBIS).  
+## 🐙 Dataset Information
 
+This project uses a bulk data dump from the Ocean Biodiversity Information System (OBIS). The ZIP archive, downloaded in July 2025, contains .parquet files representing global marine biodiversity records. No geographic, taxonomic, or temporal filters were applied during download. The ingestion pipeline performs basic cleaning (column null filtering, coordinate validation) but does not modify the data beyond ingestion prep.
+
+---
+
+**Dataset Source**
+
+The data used in this project was downloaded from the Ocean Biodiversity Information System (OBIS) in July 2025 as a bulk ZIP archive containing `.parquet` files. No geographic, taxonomic, or temporal filters were applied during download. The ingestion pipeline performs basic cleaning, including null filtering and coordinate validation, but the dataset represents a raw, unfiltered sample of the OBIS global database.
+
+---
+
+**Citation**
+
+OBIS (2025). Global distribution records from the OBIS database.  
+Ocean Biodiversity Information System. Intergovernmental Oceanographic Commission of UNESCO.  
+Available at: [https://obis.org/data/access/](https://obis.org/data/access/).
+
+---
+
+### 🪪 License
+This project is released under the MIT License.
+OBIS data is provided under the [CC0 Public Domain Dedication](https://creativecommons.org/publicdomain/zero/1.0/).
+
+---
