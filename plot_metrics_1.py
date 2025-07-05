@@ -9,7 +9,7 @@ df = df.dropna(subset=["timestamp", "rows_per_second"])
 df = df[df["rows_per_second"] > 0]
 df["timestamp"] = pd.to_datetime(df["timestamp"])
 
-# Optional: Smooth the throughput
+# Smooth the throughput
 df["smoothed"] = df["rows_per_second"].rolling(window=5).mean()
 
 # Plot

@@ -17,7 +17,7 @@ ax.set_ylabel("Rows/sec")
 ax.set_title("CPU Load vs Throughput")
 ax.grid(True)
 
-# Annotate obvious outliers (e.g. CPU usage > 40%)
+# Annotate obvious outliers
 outliers = df[df["cpu_usage"] > 40]
 for _, row in outliers.iterrows():
     ax.annotate(f"{int(row['cpu_usage'])}%", (row["cpu_usage"], row["rows_per_second"]),

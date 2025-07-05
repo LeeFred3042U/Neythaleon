@@ -4,4 +4,7 @@ sqlalchemy
 psutil
 matplotlib
 seaborn
-
+duckdb
+psycopg2-binary
+numpy
+folium
