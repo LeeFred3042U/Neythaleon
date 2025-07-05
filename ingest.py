@@ -8,11 +8,12 @@ from typing import List, Dict, Any, Optional
 import psutil
 import pandas as pd
 from dotenv import load_dotenv
-from sqlalchemy import create_engine, exc, Engine
+from sqlalchemy import create_engine, exc, Engine, text
+import duckdb
 
 # Constants
-FILE_PATH = "./occurrence.txt" #Currently only for .txt datasets
-CHUNK_SIZE = 1000
+PARQUET_DIR = "./parquet_files"
+CHUNK_SIZE = 10000
 THROTTLE_DELAY = int(os.getenv("THROTTLE_DELAY", "5")) 
 LOG_FILE = "ingestion.log"
 METRICS_FILE = "metrics_log.csv"
@@ -22,6 +23,36 @@ load_dotenv()
 DATABASE_URL = os.getenv("DATABASE_URL")
 if not DATABASE_URL:
     raise ValueError("DATABASE_URL environment variable not set")
+
+
+def validate_folder(folder_path: str) -> bool:
+    if not os.path.isdir(folder_path):
+        logging.error("Directory not found: %s", folder_path)
+        return False
+
+    files = [f for f in os.listdir(folder_path) if f.endswith(".parquet")]
+    if not files:
+        logging.error("No .parquet files found in: %s", folder_path)
+        return False
+
+    return True
+
+
+def stream_parquet_chunks(folder_path: str, chunk_size: int):
+    con = duckdb.connect()
+    parquet_glob = os.path.join(folder_path, "*.parquet")
+
+    query = f"SELECT * FROM read_parquet('{parquet_glob}')"
+    cursor = con.execute(query)
+
+    column_names = [desc[0] for desc in cursor.description]
+
+    while True:
+        rows = cursor.fetchmany(chunk_size)
+        if not rows:
+            break
+
+        yield pd.DataFrame(rows, columns=column_names)
 
 
 def configure_logging() -> None:
@@ -37,8 +68,7 @@ def configure_logging() -> None:
     )
 
 
-def track_metrics(start_time: float, rows_processed: int) -> Dict[str, Any]:
-
+def track_metrics(start_time: float, rows_processed: int, num_columns: int) -> Dict[str, Any]:
     """Track and log performance metrics."""
     duration = time.time() - start_time
 
@@ -49,17 +79,46 @@ def track_metrics(start_time: float, rows_processed: int) -> Dict[str, Any]:
         "rows_per_second": rows_processed / duration if duration > 0 else 0,
         "cpu_usage": psutil.cpu_percent(interval=1),
         "batch_size": CHUNK_SIZE,
-        "memory_mb": psutil.virtual_memory().used / (1024 * 1024)
+        "memory_mb": psutil.virtual_memory().used / (1024 * 1024),
+        "columns_retained": num_columns
     }
 
     logging.info("Metrics: %s", metrics)
     return metrics
 
 
-def process_chunk(chunk: pd.DataFrame) -> pd.DataFrame:
+def process_chunk(chunk: pd.DataFrame, null_threshold: float = 0.95, first_chunk: bool = False) -> (pd.DataFrame, int):
+    """
+    Drop columns with >null_threshold missing values.
+    Drop rows missing decimalLatitude and decimalLongitude.
+    """
+    original_cols = chunk.columns.tolist()
 
-    """Process a single chunk of data."""
-    return chunk.dropna(subset=["decimalLatitude", "decimalLongitude"])
+    # Drop columns with too many nulls
+    null_ratios = chunk.isnull().mean()
+    cols_to_keep = null_ratios[null_ratios <= null_threshold].index.tolist()
+    chunk = chunk[cols_to_keep]
+
+    # Drop rows where lat/lon are missing
+    chunk = chunk.dropna(subset=["decimalLatitude", "decimalLongitude"])
+
+    if first_chunk:
+        dropped_cols = set(original_cols) - set(cols_to_keep)
+        logging.info("Dropped %d columns due to >%.0f%% nulls: %s", len(dropped_cols), null_threshold * 100, list(dropped_cols))
+        logging.info("Retained %d columns: %s", len(cols_to_keep), cols_to_keep)
+
+    return chunk, len(cols_to_keep)
+
+
+def insert_row(row: pd.Series, engine: Engine) -> bool:
+
+    """Fallback: Insert single row if batch fails."""
+    try:
+        pd.DataFrame([row]).to_sql("obis_data", con=engine, if_exists="append", index=False)
+        return True
+    except exc.SQLAlchemyError as e:
+        logging.error("Row insert failed: %s | Data: %s", e, row.to_dict())
+        return False
 
 
 def persist_metrics(metrics_history: List[Dict[str, Any]]) -> None:
@@ -71,56 +130,32 @@ def persist_metrics(metrics_history: List[Dict[str, Any]]) -> None:
         logging.error("Failed to persist metrics: %s", e)
 
 
-def validate_file(file_path: str) -> bool:
-
-    """Validate input file exists and is readable."""
-    if not os.path.exists(file_path):
-        logging.error("File not found: %s", file_path)
-        return False
-    if not os.access(file_path, os.R_OK):
-        logging.error("File not readable: %s", file_path)
-        return False
-    return True
-
-
-def insert_row(row: pd.Series, engine: Engine) -> bool:
-
-    """Insert single row with error handling."""
-    try:
-        pd.DataFrame([row]).to_sql(
-            "obis_data",
-            con=engine,
-            if_exists="append",
-            index=False
-        )
-        return True
-    
-    except exc.SQLAlchemyError as e:
-        logging.error("Row insert failed: %s | Data: %s", e, row.to_dict())
-        return False
-
-
 def ingest_data(engine: Engine) -> Optional[List[Dict[str, Any]]]:
 
     """Main ingestion function with comprehensive error handling."""
-    if not validate_file(FILE_PATH):
+    if not validate_folder(PARQUET_DIR):
         sys.exit(1)
 
     total_rows = 0
     metrics_history = []
 
     try:
-        for chunk in pd.read_csv(FILE_PATH, sep="\t", chunksize=CHUNK_SIZE):
+        chunks = stream_parquet_chunks(PARQUET_DIR, CHUNK_SIZE)
+
+        for i, chunk in enumerate(chunks):
             start_time = time.time()
-            processed_chunk = process_chunk(chunk)
+            processed_chunk, num_columns = process_chunk(chunk)
             rows_processed = len(processed_chunk)
+            metrics = track_metrics(start_time, rows_processed, num_columns)
+
 
             try:
                 processed_chunk.to_sql(
                     "obis_data",
                     con=engine,
                     if_exists="append",
-                    index=False
+                    index=False,
+                    method="multi"
                 )
                 total_rows += rows_processed
 
@@ -133,12 +168,29 @@ def ingest_data(engine: Engine) -> Optional[List[Dict[str, Any]]]:
                 )
                 total_rows += successful_rows
 
-            metrics_history.append(track_metrics(start_time, rows_processed))
+            metrics = track_metrics(start_time, rows_processed, len(processed_chunk.columns))
+            metrics_history.append(metrics)
+
+            # Save metrics immediately (append-safe)
+            pd.DataFrame([metrics]).to_csv(
+                METRICS_FILE,
+                mode="a",
+                header=not os.path.exists(METRICS_FILE),
+                index=False
+            )
+
             logging.info("Processed %s rows. Total: %s", rows_processed, total_rows)
             time.sleep(THROTTLE_DELAY)
 
+
         persist_metrics(metrics_history)
         logging.info("Ingestion complete. Total rows: %s", total_rows)
+
+        try:
+            con.close()
+        except Exception:
+            pass
+
         return metrics_history
 
     except Exception as e:
@@ -151,12 +203,19 @@ if __name__ == "__main__":
 
     parser = argparse.ArgumentParser(description="Ingest OBIS .txt data with metrics")
     parser.add_argument("--debug", action="store_true", help="Enable debug logging")
-
     args = parser.parse_args()
 
     if args.debug:
         logging.getLogger().setLevel(logging.DEBUG)
 
     configure_logging()
-    db_engine = create_engine(DATABASE_URL)
+    try:
+        db_engine = create_engine(DATABASE_URL)
+        # Validate DB connection early
+        with db_engine.connect() as conn:
+            conn.execute(text("SELECT 1"))
+    except exc.SQLAlchemyError as e:
+        logging.critical("DB connection failed: %s", e)
+        sys.exit(1)
+
     ingest_data(db_engine)
