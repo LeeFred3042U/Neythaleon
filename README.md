@@ -1,16 +1,17 @@
-# OceanScope
+# Neythaleon
 
-OceanScope is a Python-based pipeline designed to ingest `.parquet` data from the Ocean Biodiversity Information System (OBIS) into a PostgreSQL-compatible database. It features chunked ingestion, automatic fallback for failed inserts, performance logging, and flexible environment configuration.
+**Neythaleon** is an energy-aware marine observability toolkit focused on ingesting, monitoring, and visualizing ocean biodiversity datasets. Originally developed using IndOBIS Kochi region data later to OBIS, it emphasizes sustainable data engineering using DuckDB, Pandas, GeoPandas, and PostgreSQL (Neon).
+
+> *“The Eye Below Logs Everything.”*
 
 ---
 
-## 🚀 Features
+## Features
 
-- 🔄 **Chunked ingestion** of large `.parquet` datasets using DuckDB
-- 🧱 **Row-level fallback** on bulk insert failure
-- ⚙️ **Environment-based config** via `.env`
-- 📊 **Performance metrics**: CPU, memory, rows/sec, etc.
-- 🪵 **Structured logging** to both console and file
+- 🔹 Ingest `.parquet` datasets with fallback support
+- 🔹 Track latency, nulls, and data volume in real time
+- 🔹 Plot marine biodiversity using Folium + Matplotlib
+- 🔹 Run on limited hardware — optimized for edge cases
 
 ---
 
