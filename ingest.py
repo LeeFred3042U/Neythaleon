@@ -13,7 +13,7 @@ import duckdb
 
 # Constants
 PARQUET_DIR = "./parquet_files"
-CHUNK_SIZE = 10000
+CHUNK_SIZE = 2500 # Subject to Change
 THROTTLE_DELAY = int(os.getenv("THROTTLE_DELAY", "5")) 
 LOG_FILE = "ingestion.log"
 METRICS_FILE = "metrics_log.csv"
@@ -39,20 +39,21 @@ def validate_folder(folder_path: str) -> bool:
 
 
 def stream_parquet_chunks(folder_path: str, chunk_size: int):
+
     con = duckdb.connect()
     parquet_glob = os.path.join(folder_path, "*.parquet")
 
-    query = f"SELECT * FROM read_parquet('{parquet_glob}')"
-    cursor = con.execute(query)
+    # Get total rows
+    total_rows = con.execute(f"SELECT COUNT(*) FROM read_parquet('{parquet_glob}')").fetchone()[0]
 
-    column_names = [desc[0] for desc in cursor.description]
+    for offset in range(0, total_rows, chunk_size):
+        query = f"""
+            SELECT * FROM read_parquet('{parquet_glob}')
+            LIMIT {chunk_size} OFFSET {offset}
+        """
 
-    while True:
-        rows = cursor.fetchmany(chunk_size)
-        if not rows:
-            break
-
-        yield pd.DataFrame(rows, columns=column_names)
+        df = con.execute(query).fetchdf()
+        yield df
 
 
 def configure_logging() -> None:
@@ -80,7 +81,8 @@ def track_metrics(start_time: float, rows_processed: int, num_columns: int) -> D
         "cpu_usage": psutil.cpu_percent(interval=1),
         "batch_size": CHUNK_SIZE,
         "memory_mb": psutil.virtual_memory().used / (1024 * 1024),
-        "columns_retained": num_columns
+        "cpu_usage": psutil.cpu_percent(interval=None),
+
     }
 
     logging.info("Metrics: %s", metrics)
@@ -88,19 +90,14 @@ def track_metrics(start_time: float, rows_processed: int, num_columns: int) -> D
 
 
 def process_chunk(chunk: pd.DataFrame, null_threshold: float = 0.95, first_chunk: bool = False) -> (pd.DataFrame, int):
-    """
-    Drop columns with >null_threshold missing values.
-    Drop rows missing decimalLatitude and decimalLongitude.
-    """
+
     original_cols = chunk.columns.tolist()
 
-    # Drop columns with too many nulls
     null_ratios = chunk.isnull().mean()
     cols_to_keep = null_ratios[null_ratios <= null_threshold].index.tolist()
-    chunk = chunk[cols_to_keep]
 
-    # Drop rows where lat/lon are missing
-    chunk = chunk.dropna(subset=["decimalLatitude", "decimalLongitude"])
+    chunk = chunk[cols_to_keep]
+    chunk.dropna(subset=["decimalLatitude", "decimalLongitude"], inplace=True)
 
     if first_chunk:
         dropped_cols = set(original_cols) - set(cols_to_keep)
@@ -116,6 +113,7 @@ def insert_row(row: pd.Series, engine: Engine) -> bool:
     try:
         pd.DataFrame([row]).to_sql("obis_data", con=engine, if_exists="append", index=False)
         return True
+
     except exc.SQLAlchemyError as e:
         logging.error("Row insert failed: %s | Data: %s", e, row.to_dict())
         return False
@@ -126,13 +124,12 @@ def persist_metrics(metrics_history: List[Dict[str, Any]]) -> None:
     """Save metrics to persistent storage."""
     try:
         pd.DataFrame(metrics_history).to_csv(METRICS_FILE, index=False)
+
     except (IOError, pd.errors.EmptyDataError) as e:
         logging.error("Failed to persist metrics: %s", e)
 
 
 def ingest_data(engine: Engine) -> Optional[List[Dict[str, Any]]]:
-
-    """Main ingestion function with comprehensive error handling."""
     if not validate_folder(PARQUET_DIR):
         sys.exit(1)
 
@@ -144,10 +141,12 @@ def ingest_data(engine: Engine) -> Optional[List[Dict[str, Any]]]:
 
         for i, chunk in enumerate(chunks):
             start_time = time.time()
-            processed_chunk, num_columns = process_chunk(chunk)
-            rows_processed = len(processed_chunk)
-            metrics = track_metrics(start_time, rows_processed, num_columns)
 
+            processed_chunk, num_columns = process_chunk(chunk, first_chunk=(i == 0))
+            rows_processed = len(processed_chunk)
+
+            if rows_processed == 0:
+                continue  # Skips empty chunk
 
             try:
                 processed_chunk.to_sql(
@@ -160,18 +159,20 @@ def ingest_data(engine: Engine) -> Optional[List[Dict[str, Any]]]:
                 total_rows += rows_processed
 
             except exc.SQLAlchemyError as e:
+
                 logging.error("Chunk insert failed: %s", e)
                 logging.info("Attempting row-by-row fallback...")
+
                 successful_rows = sum(
                     insert_row(row, engine)
                     for _, row in processed_chunk.iterrows()
                 )
+
                 total_rows += successful_rows
 
-            metrics = track_metrics(start_time, rows_processed, len(processed_chunk.columns))
+            metrics = track_metrics(start_time, rows_processed, num_columns)
             metrics_history.append(metrics)
 
-            # Save metrics immediately (append-safe)
             pd.DataFrame([metrics]).to_csv(
                 METRICS_FILE,
                 mode="a",
@@ -182,14 +183,11 @@ def ingest_data(engine: Engine) -> Optional[List[Dict[str, Any]]]:
             logging.info("Processed %s rows. Total: %s", rows_processed, total_rows)
             time.sleep(THROTTLE_DELAY)
 
+            import gc
+            gc.collect()  # Force garbage collection
 
         persist_metrics(metrics_history)
         logging.info("Ingestion complete. Total rows: %s", total_rows)
-
-        try:
-            con.close()
-        except Exception:
-            pass
 
         return metrics_history
 
@@ -211,7 +209,8 @@ if __name__ == "__main__":
     configure_logging()
     try:
         db_engine = create_engine(DATABASE_URL)
-        # Validate DB connection early
+
+        # Validating DB connection prior
         with db_engine.connect() as conn:
             conn.execute(text("SELECT 1"))
     except exc.SQLAlchemyError as e:
