@@ -1,3 +1,5 @@
+import os
+
 import pandas as pd
 import matplotlib.pyplot as plt
 
@@ -24,5 +26,6 @@ for _, row in outliers.iterrows():
                 textcoords="offset points", xytext=(0, 10), ha='center', fontsize=8, color='red')
 
 plt.tight_layout()
-plt.savefig("pipeline_metrics_2.png")
+os.makedirs("media", exist_ok=True)
+plt.savefig("media/pipeline_metrics_1.png")
 print("Saved plot to pipeline_metrics_2.png")

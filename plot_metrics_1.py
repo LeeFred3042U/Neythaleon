@@ -1,3 +1,5 @@
+import os
+
 import pandas as pd
 import matplotlib.pyplot as plt
 
@@ -24,5 +26,6 @@ plt.xticks(rotation=45)
 ax.legend()
 
 plt.tight_layout()
-plt.savefig("pipeline_metrics_1.png")
+os.makedirs("media", exist_ok=True)
+plt.savefig("media/pipeline_metrics_1.png")
 print("Saved plot to pipeline_metrics_1.png")
