@@ -1,4 +1,5 @@
 import os
+import io
 import sys
 import time
 import logging
@@ -39,21 +40,15 @@ def validate_folder(folder_path: str) -> bool:
 
 
 def stream_parquet_chunks(folder_path: str, chunk_size: int):
+    with duckdb.connect() as con:
+        con = duckdb.connect()
+        parquet_glob = os.path.join(folder_path, "*.parquet")
 
-    con = duckdb.connect()
-    parquet_glob = os.path.join(folder_path, "*.parquet")
-
-    # Get total rows
-    total_rows = con.execute(f"SELECT COUNT(*) FROM read_parquet('{parquet_glob}')").fetchone()[0]
-
-    for offset in range(0, total_rows, chunk_size):
-        query = f"""
-            SELECT * FROM read_parquet('{parquet_glob}')
-            LIMIT {chunk_size} OFFSET {offset}
-        """
-
+        query = f"SELECT * FROM read_parquet('{parquet_glob}')"
         df = con.execute(query).fetchdf()
-        yield df
+
+        for start in range(0, len(df), chunk_size):
+            yield df.iloc[start:start + chunk_size].copy()
 
 
 def configure_logging() -> None:
@@ -78,15 +73,17 @@ def track_metrics(start_time: float, rows_processed: int, num_columns: int) -> D
         "processing_time": duration,
         "rows_processed": rows_processed,
         "rows_per_second": rows_processed / duration if duration > 0 else 0,
-        "cpu_usage": psutil.cpu_percent(interval=1),
+        "cpu_usage": psutil.cpu_percent(interval=None),
         "batch_size": CHUNK_SIZE,
         "memory_mb": psutil.virtual_memory().used / (1024 * 1024),
-        "cpu_usage": psutil.cpu_percent(interval=None),
-
     }
 
     logging.info("Metrics: %s", metrics)
     return metrics
+
+
+def log_resources(step: str):
+    logging.debug(f"[{step}] CPU: {psutil.cpu_percent()}%, RAM: {psutil.virtual_memory().percent}%")
 
 
 def process_chunk(chunk: pd.DataFrame, null_threshold: float = 0.95, first_chunk: bool = False) -> (pd.DataFrame, int):
@@ -107,26 +104,34 @@ def process_chunk(chunk: pd.DataFrame, null_threshold: float = 0.95, first_chunk
     return chunk, len(cols_to_keep)
 
 
-def insert_row(row: pd.Series, engine: Engine) -> bool:
-
-    """Fallback: Insert single row if batch fails."""
-    try:
-        pd.DataFrame([row]).to_sql("obis_data", con=engine, if_exists="append", index=False)
-        return True
-
-    except exc.SQLAlchemyError as e:
-        logging.error("Row insert failed: %s | Data: %s", e, row.to_dict())
-        return False
-
-
 def persist_metrics(metrics_history: List[Dict[str, Any]]) -> None:
+    if not metrics_history:
+        return
 
-    """Save metrics to persistent storage."""
+    df = pd.DataFrame(metrics_history)
+    df.to_csv(
+        METRICS_FILE,
+        mode="w",
+        index=False,
+        header=True
+    )
+
+
+def copy_insert(engine: Engine, df: pd.DataFrame) -> None:
+    buffer = io.StringIO()
+    df.to_csv(buffer, index=False, header=False)
+    buffer.seek(0)
+    conn = engine.raw_connection()
+    cursor = conn.cursor()
     try:
-        pd.DataFrame(metrics_history).to_csv(METRICS_FILE, index=False)
-
-    except (IOError, pd.errors.EmptyDataError) as e:
-        logging.error("Failed to persist metrics: %s", e)
+        cursor.copy_expert("COPY obis_data FROM STDIN WITH CSV", buffer)
+        conn.commit()
+    except Exception as e:
+        conn.rollback()
+        raise e
+    finally:
+        cursor.close()
+        conn.close()
 
 
 def ingest_data(engine: Engine) -> Optional[List[Dict[str, Any]]]:
@@ -146,45 +151,33 @@ def ingest_data(engine: Engine) -> Optional[List[Dict[str, Any]]]:
             rows_processed = len(processed_chunk)
 
             if rows_processed == 0:
-                continue  # Skips empty chunk
+                continue  # Skip empty chunk
 
             try:
-                processed_chunk.to_sql(
-                    "obis_data",
-                    con=engine,
-                    if_exists="append",
-                    index=False,
-                    method="multi"
-                )
+                # 🚀 Use fast COPY insert here
+                copy_insert(engine, processed_chunk)
                 total_rows += rows_processed
 
-            except exc.SQLAlchemyError as e:
-
+            except Exception as e:
                 logging.error("Chunk insert failed: %s", e)
-                logging.info("Attempting row-by-row fallback...")
-
-                successful_rows = sum(
-                    insert_row(row, engine)
-                    for _, row in processed_chunk.iterrows()
-                )
-
-                total_rows += successful_rows
+                logging.warning("Skipping chunk due to COPY failure. No fallback.")
+                # Optional: Save the chunk to fallback.csv
+                failed_path = f"failed_chunk_{i}.csv"
+                processed_chunk.to_csv(failed_path, index=False)
+                logging.warning("Saved failed chunk to: %s", failed_path)
 
             metrics = track_metrics(start_time, rows_processed, num_columns)
             metrics_history.append(metrics)
 
-            pd.DataFrame([metrics]).to_csv(
-                METRICS_FILE,
-                mode="a",
-                header=not os.path.exists(METRICS_FILE),
-                index=False
-            )
+            logging.info("Processed %s rows. Total so far: %s", rows_processed, total_rows)
 
-            logging.info("Processed %s rows. Total: %s", rows_processed, total_rows)
             time.sleep(THROTTLE_DELAY)
 
+            # 🔥 Memory hygiene
             import gc
-            gc.collect()  # Force garbage collection
+            del chunk
+            del processed_chunk
+            gc.collect()
 
         persist_metrics(metrics_history)
         logging.info("Ingestion complete. Total rows: %s", total_rows)
