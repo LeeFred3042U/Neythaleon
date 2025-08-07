@@ -2,11 +2,14 @@ import os
 import io
 import sys
 import time
+import glob
+import inspect
 import logging
 from datetime import datetime
 from typing import List, Dict, Any, Optional, Tuple
 
 import psutil
+import numpy as np
 import pandas as pd
 from dotenv import load_dotenv
 from sqlalchemy import create_engine, exc, Engine, text
@@ -14,40 +17,83 @@ import duckdb
 from pathlib import Path
 
 
+load_dotenv()
+
+
 # Constants
 PARQUET_DIR = "./parquet_files"
-CHUNK_SIZE = 2500 # Subject to Change
+CHUNK_SIZE = 10000 # Change According to your system
 THROTTLE_DELAY = int(os.getenv("THROTTLE_DELAY", "5")) 
 LOG_FILE = "ingestion.log"
 METRICS_FILE = "metrics_log.csv"
 FAILED_DIR = Path("failed_chunks")
 FAILED_DIR.mkdir(exist_ok=True)
+DB_TABLE = os.getenv("DB_TABLE")
 
 
-load_dotenv()
 DATABASE_URL = os.getenv("DATABASE_URL")
 if not DATABASE_URL:
     raise ValueError("DATABASE_URL environment variable not set")
 
 
-def validate_folder(folder_path: str) -> bool:
-    """
-    Check if folder exists and contains .parquet files
+def create_table_if_not_exists(engine, df, table_name):
+    inspector = inspect(engine)
+    if not inspector.has_table(table_name):
+        df.head(0).to_sql(table_name, engine, index=False)  # Just headers
+        logging.info(f"Table {table_name} created.")
 
-    Equivalent of checking if an input file or directory exists
-    before a data pipeline kicks off
-    
-    Basic sanity check
-    """
-    if not os.path.isdir(folder_path):
-        logging.error("Directory not found: %s", folder_path)
-        return False
 
-    files = [f for f in os.listdir(folder_path) if f.endswith(".parquet")]
+def validate_folder(folder):
+    """
+    Validates that the folder exists and contains .parquet files.
+    Raises ValueError instead of exiting directly.
+    """
+    if not os.path.exists(folder):
+        raise ValueError(f"Folder {folder} does not exist.")
+    files = glob.glob(os.path.join(folder, "*.parquet"))
     if not files:
-        logging.error("No .parquet files found in: %s", folder_path)
-        return False
+        raise ValueError(f"No .parquet files found in {folder}.")
+    return True
 
+
+def get_table_columns(engine, table_name):
+    """
+    Retrieves column names from the target PostgreSQL table to validate schema match.
+    """
+    with engine.connect() as conn:
+        result = conn.execute(f'''
+            SELECT column_name
+            FROM information_schema.columns
+            WHERE table_name = '{table_name}'
+            ORDER BY ordinal_position;
+        ''')
+        return [row[0] for row in result]
+
+
+def safe_chunk_read(batch, file_path, i):
+    """
+    Converts a DuckDB record batch to a pandas DataFrame with safety checks.
+    """
+    try:
+        chunk = batch.to_pandas()
+        if chunk.empty:
+            logging.warning(f"Empty chunk {i} from {file_path}")
+            return None
+        return chunk
+    except Exception as e:
+        logging.error(f"Failed to read chunk {i} from {file_path}: {e}")
+        return None
+
+
+def guard_required_columns(df, required_cols):
+    """
+    Ensures the required columns exist in the DataFrame before processing.
+    Returns True if safe, False if missing.
+    """
+    missing = [col for col in required_cols if col not in df.columns]
+    if missing:
+        logging.warning(f"Missing required columns: {missing}")
+        return False
     return True
 
 
@@ -59,13 +105,17 @@ def stream_parquet_chunks(folder_path: str, chunk_size: int):
     Memory-friendly vs loading full dataset in RAM
     """
     with duckdb.connect() as con:
-        parquet_glob = os.path.join(folder_path, "*.parquet")
+            parquet_glob = os.path.join(folder_path, "*.parquet")
 
-        query = f"SELECT * FROM read_parquet('{parquet_glob}')"
-        df = con.execute(query).fetchdf()
+            query = f"SELECT * FROM read_parquet('{parquet_glob}')"
 
-        for start in range(0, len(df), chunk_size):
-            yield df.iloc[start:start + chunk_size].copy()
+            reader = con.execute(query).fetch_record_batch(chunk_size)
+            while True:
+                try:
+                    chunk = reader.read_next_batch()
+                    yield chunk.to_pandas()
+                except StopIteration:
+                    break # No more chunks
 
 
 def configure_logging() -> None:
@@ -81,8 +131,13 @@ def configure_logging() -> None:
     )
 
 
-def log_resources(step: str):
-    logging.debug(f"[{step}] CPU: {psutil.cpu_percent()}%, RAM: {psutil.virtual_memory().percent}%")
+def log_resources(step):
+    """
+    Logs current CPU and RAM usage with context about the pipeline step.
+    """
+    cpu = psutil.cpu_percent()
+    ram = psutil.virtual_memory().percent
+    logging.info(f"[{step}] CPU: {cpu}%, RAM: {ram}%")
 
 
 def process_chunk(chunk: pd.DataFrame, null_threshold: float = 0.95, first_chunk: bool = False) -> Tuple[pd.DataFrame, int]:
@@ -98,7 +153,10 @@ def process_chunk(chunk: pd.DataFrame, null_threshold: float = 0.95, first_chunk
 
     null_ratios = chunk.isnull().mean()
     cols_to_keep = null_ratios[null_ratios <= null_threshold].index.tolist()
-    chunk = chunk.dropna(subset=["decimalLatitude", "decimalLongitude"]).copy()
+    required_columns = ["decimalLatitude", "decimalLongitude"]
+    if not all(col in chunk.columns for col in required_columns):
+        logging.warning(f"Skipping chunk missing lat/lon columns: {chunk.columns}")
+    chunk = chunk.dropna(subset=required_columns).copy()
 
 
     if first_chunk:
@@ -114,35 +172,53 @@ def persist_metrics(metrics_history: List[Dict[str, Any]]) -> None:
         return
 
     df = pd.DataFrame(metrics_history)
+    # A more efficient way to save metrics
+    file_exists = os.path.exists(METRICS_FILE)
     df.to_csv(
         METRICS_FILE,
-        mode="w",
+        mode="a", # 'a' for append
         index=False,
-        header=True
+        header=not file_exists # Only write header if file is new
     )
 
+def clean_null_bytes(df: pd.DataFrame) -> pd.DataFrame:
+    def clean_value(val):
+        if isinstance(val, (list, tuple, np.ndarray, pd.Series)):
+            return val  # skip complex types for now
 
-def copy_insert(engine: Engine, df: pd.DataFrame) -> None:
-    """
-    Uses Postgres `COPY` (faster than row-by-row insert)
-    to stream the chunk directly into the target table
-    
-    Will raise if the data format doesn't match schema
-    """
-    buffer = io.StringIO()
-    df.to_csv(buffer, index=False, header=False)
-    buffer.seek(0)
-    conn = engine.raw_connection()
-    cursor = conn.cursor()
+        # Convert bytes → string
+        if isinstance(val, bytes):
+            val = val.decode("utf-8", errors="replace")
+
+        # Strip NULL bytes from strings
+        if isinstance(val, str):
+            val = val.replace('\x00', '')
+
+        # Handle float NaN
+        if isinstance(val, float) and np.isnan(val):
+            return None
+
+        return val
+
+    return df.apply(lambda col: col.map(clean_value))
+
+
+def copy_insert(engine, df, chunk_id, table_name):
     try:
-        cursor.copy_expert("COPY obis_data FROM STDIN WITH CSV", buffer)
-        conn.commit()
+        with engine.connect() as connection:
+            output = io.StringIO()
+
+            # Write as TSV
+            df.to_csv(output, sep="\t", header=False, index=False)
+            output.seek(0)
+
+            cursor = connection.connection.cursor()
+            cursor.copy_from(output, table_name, null="")
+
+            connection.connection.commit()
     except Exception as e:
-        conn.rollback()
-        raise e
-    finally:
-        cursor.close()
-        conn.close()
+        logging.exception(f"Insert failed on chunk {chunk_id} — {e}")
+        logging.debug("Offending chunk head:\n%s", df.head(3).to_string())
 
 
 def track_metrics(start_time: float, rows_processed: int, num_columns: int) -> Dict[str, Any]:
@@ -187,10 +263,11 @@ def ingest_data(engine: Engine) -> Optional[List[Dict[str, Any]]]:
             if rows_processed == 0:
                 continue  # Skip empty chunk
 
-            try:
-                copy_insert(engine, processed_chunk)
-                total_rows += rows_processed
+            processed_chunk = clean_null_bytes(processed_chunk)
 
+            try:
+                copy_insert(engine, processed_chunk, i, DB_TABLE)
+                total_rows += rows_processed
             except Exception as e:
                 logging.error("Chunk insert failed: %s", e)
                 save_failed_chunk(processed_chunk, i)
@@ -199,13 +276,7 @@ def ingest_data(engine: Engine) -> Optional[List[Dict[str, Any]]]:
             metrics_history.append(metrics)
 
             logging.info("Processed %s rows. Total so far: %s", rows_processed, total_rows)
-
             time.sleep(THROTTLE_DELAY)
-
-            import gc
-            del chunk
-            del processed_chunk
-            gc.collect()
 
         persist_metrics(metrics_history)
         logging.info("Ingestion complete. Total rows: %s", total_rows)
@@ -220,6 +291,7 @@ def ingest_data(engine: Engine) -> Optional[List[Dict[str, Any]]]:
 def save_failed_chunk(df: pd.DataFrame, chunk_id: int):
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     path = FAILED_DIR / f"failed_chunk_{chunk_id}_{timestamp}.csv"
+    df = clean_null_bytes(df)
     df.to_csv(path, index=False)
     logging.warning(f"Saved failed chunk to: {path}")
 

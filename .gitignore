@@ -1,7 +1,6 @@
 # Ignore data and outputs
 *.csv
 *.log
-*.png
 *.html
 
 # Ignoring specific raw/input/data/inspect files
@@ -19,5 +18,5 @@ __pycache__/
 .env
 parquet_files/
 
-# Temporary scripts (not part of core pipeline)
+# Temporary scripts
 plot_coords_map.py
