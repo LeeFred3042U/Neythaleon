@@ -8,3 +8,6 @@ duckdb
 psycopg2-binary
 numpy
 folium
+pyarrow
+shapely
+pandera

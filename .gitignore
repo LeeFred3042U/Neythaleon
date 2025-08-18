@@ -14,9 +14,15 @@ map.html
 
 # Environment + build
 __pycache__/
-.venv/
+venv/
 .env
 parquet_files/
 
 # Temporary scripts
 plot_coords_map.py
+
+#datasets
+fhv_data
+gbif
+parquet_files
+parquet
