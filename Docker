@@ -1,0 +1,37 @@
+# Lightweight reproducible environment for Neythaleon
+FROM python:3.10-slim
+
+ENV PYTHONUNBUFFERED=1
+WORKDIR /app
+
+# Install small set of system dependencies for optional builds (libpq for psycopg2, etc.)
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    gcc \
+    libpq-dev \
+    git \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy requirements and install
+COPY requirements.txt /app/requirements.txt
+RUN python -m pip install --upgrade pip setuptools wheel
+RUN pip install --no-cache-dir -r /app/requirements.txt
+
+# Copy repository
+COPY . /app
+
+# Create folders used by pipeline
+RUN mkdir -p /app/failed_chunks /app/media /app/ParquetData /app/experiments
+
+# Default environment variables (can be overridden via --env-file or -e)
+ENV PARQUET_DIR="/app/ParquetData"
+ENV METRICS_FILE="/app/metrics_log.csv"
+ENV DB_TABLE="TableName"
+ENV THROTTLE_DELAY=0
+ENV VALIDATE_COORDS=false
+
+WORKDIR /app
+
+# Default entrypoint is a shell (so you can run scripts / debug)
+CMD ["bash"]

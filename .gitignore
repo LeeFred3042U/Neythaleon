@@ -2,6 +2,7 @@
 *.csv
 *.log
 *.html
+*.parquet
 
 # Ignoring specific raw/input/data/inspect files
 occurrence.txt
@@ -16,6 +17,7 @@ map.html
 __pycache__/
 venv/
 .env
+.venv
 parquet_files/
 
 # Temporary scripts
@@ -26,3 +28,7 @@ fhv_data
 gbif
 parquet_files
 parquet
+
+dump.sh
+
+neyCode.txt
