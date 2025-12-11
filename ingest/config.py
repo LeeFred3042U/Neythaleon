@@ -33,3 +33,4 @@ INT_COLUMNS = [c.strip() for c in os.getenv("INT_COLUMNS", "").split(",") if c.s
 CPU_THRESHOLD = int(os.getenv("CPU_THRESHOLD", "85"))
 THROTTLE_DELAY_HIGH_CPU = float(os.getenv("THROTTLE_DELAY_HIGH_CPU", "2"))
 THROTTLE_DELAY = float(os.getenv("THROTTLE_DELAY", "0"))
+RAM_THRESHOLD = 85.0

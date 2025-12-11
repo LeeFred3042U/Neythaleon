@@ -14,6 +14,7 @@ from ingest.config import (
     CPU_THRESHOLD,
     THROTTLE_DELAY_HIGH_CPU,
     THROTTLE_DELAY,
+    RAM_THRESHOLD,
 )
 
 from ingest.db_utils import copy_insert, get_table_columns, create_table_from_df, save_failed_chunk, get_table_schema
@@ -55,7 +56,6 @@ def _create_table_if_missing(engine):
     create_table_from_df(engine, DB_TABLE, schema_df)
     return get_table_columns(engine, DB_TABLE)
 
-
 def ingest_data():
     engine = create_engine(DATABASE_URL)
 
@@ -66,19 +66,18 @@ def ingest_data():
     metrics_history = []
 
     # fetch schema_map once (outside the loop)
-    schema_map = get_table_schema(engine, DB_TABLE)  # use the new function
+    schema_map = get_table_schema(engine, DB_TABLE)
 
     for i, chunk in enumerate(stream_parquet_chunks(PARQUET_DIR, CHUNK_SIZE)):
         start = time.time()
         try:
             df = process_chunk(chunk, int_columns=INT_COLUMNS)
 
-            # Align schema
+            # Align schema column order
             if db_cols:
                 df = df.reindex(columns=db_cols)
 
-            
-            # inside loop, after df = df.reindex(columns=db_cols)
+            # Coerce data types to match DB schema
             try:
                 df = coerce_df_to_schema(df, schema_map)
             except Exception:
@@ -94,10 +93,27 @@ def ingest_data():
             total_rows += len(df)
             logger.info("Chunk %d processed (%d rows). Total: %d", i, len(df), total_rows)
 
-            # Throttle on high CPU
-            if psutil.cpu_percent(interval=None) > CPU_THRESHOLD:
-                logger.warning("High CPU detected. Sleeping %ss", THROTTLE_DELAY_HIGH_CPU)
+            # Resource Throttling (CPU & RAM) 
+            cpu_usage = psutil.cpu_percent(interval=None)
+            mem_usage = psutil.virtual_memory().percent
+
+            if cpu_usage > CPU_THRESHOLD:
+                logger.warning(
+                    "High CPU detected (%.1f%%). Sleeping %ss", 
+                    cpu_usage, THROTTLE_DELAY_HIGH_CPU
+                )
                 time.sleep(THROTTLE_DELAY_HIGH_CPU)
+            
+            elif mem_usage > RAM_THRESHOLD:
+                logger.warning(
+                    "High Memory detected (%.1f%%). Sleeping %ss to allow GC", 
+                    mem_usage, THROTTLE_DELAY_HIGH_CPU
+                )
+                # Force garbage collection to free up memory before next chunk
+                import gc
+                gc.collect()
+                time.sleep(THROTTLE_DELAY_HIGH_CPU)
+
             else:
                 if THROTTLE_DELAY:
                     time.sleep(THROTTLE_DELAY)
@@ -111,4 +127,5 @@ def ingest_data():
             continue
 
     logger.info("Ingestion complete. Rows processed: %d", total_rows)
+
     return metrics_history
