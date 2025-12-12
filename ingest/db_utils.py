@@ -49,7 +49,7 @@ def copy_insert(engine, df: pd.DataFrame, table_name: str):
             raw_conn = conn.connection
             with raw_conn.cursor() as cur:
                 output = io.StringIO()
-                # Use TSV with quoting to be robust; adapt as needed
+                
                 df.to_csv(
                     output, 
                     sep="\t",
@@ -57,13 +57,19 @@ def copy_insert(engine, df: pd.DataFrame, table_name: str):
                     index=False, 
                     quoting=csv.QUOTE_MINIMAL, 
                     escapechar='\\', 
-                    na_rep=''
+                    na_rep='',
+                    encoding='utf-8' # Explicit encoding
                 )
                 output.seek(0)
+                
                 quoted_columns = ",".join(f'"{c}"' for c in df.columns)
-                sql = f"COPY {table_name} ({quoted_columns}) FROM STDIN WITH (FORMAT CSV, DELIMITER E'\\t', QUOTE '\"', NULL '')"
+                
+                # Ensure the COPY command expects UTF-8 (usually default, but good to be sure)
+                sql = f"COPY {table_name} ({quoted_columns}) FROM STDIN WITH (FORMAT CSV, DELIMITER E'\\t', QUOTE '\"', NULL '', ENCODING 'UTF8')"
                 cur.copy_expert(sql, output)
+                
         logger.debug("Inserted %d rows into %s (COPY)", len(df), table_name)
+
     except Exception as e:
         logger.warning("COPY failed, falling back to pandas.to_sql: %s", e)
         try:
