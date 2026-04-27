@@ -1,131 +1,231 @@
+import gc
+import itertools
 import logging
 import time
+from concurrent.futures import ThreadPoolExecutor
 
-from sqlalchemy import create_engine
 import pandas as pd
 import psutil
+from sqlalchemy import create_engine
 
 from ingest.config import (
+    CPU_THRESHOLD,
+    CHUNK_SIZE,
     DATABASE_URL,
     DB_TABLE,
-    PARQUET_DIR,
-    CHUNK_SIZE,
     INT_COLUMNS,
-    CPU_THRESHOLD,
-    THROTTLE_DELAY_HIGH_CPU,
-    THROTTLE_DELAY,
+    MANIFEST_FILE,
+    PARALLELISM,
+    PARQUET_DIR,
     RAM_THRESHOLD,
+    THROTTLE_DELAY,
+    THROTTLE_DELAY_HIGH_CPU,
 )
-
-from ingest.db_utils import copy_insert, get_table_columns, create_table_from_df, save_failed_chunk, get_table_schema
-from ingest.parquet_utils import stream_parquet_chunks, get_full_schema_from_parquet
-from ingest.transform import process_chunk
-from ingest.metrics import track_metrics, persist_metrics
+from ingest.db_utils import (
+    copy_insert,
+    create_table_from_df,
+    get_table_columns,
+    get_table_schema,
+    save_failed_chunk,
+)
+from ingest.manifest import build_schema_df, infer_int_columns, load_manifest
+from ingest.metrics import persist_metrics, track_metrics
+from ingest.parquet_utils import get_full_schema_from_parquet, stream_parquet_chunks
 from ingest.scheme_utils import coerce_df_to_schema
+from ingest.transform import process_chunk
 
 logger = logging.getLogger(__name__)
 
 
-def _create_table_if_missing(engine):
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+def _batched(iterable, n: int):
+    """Yield successive non-overlapping batches of size n from an iterable."""
+    it = iter(iterable)
+    while batch := list(itertools.islice(it, n)):
+        yield batch
+
+
+def _transform_one(chunk: pd.DataFrame, int_columns: list) -> pd.DataFrame:
+    """Stateless transform — safe for concurrent execution in a thread pool."""
+    return process_chunk(chunk, int_columns=int_columns)
+
+
+def _throttle_if_needed(cpu_usage: float, mem_usage: float) -> None:
+    """Sleep (and optionally GC) when system resources are under pressure."""
+    if cpu_usage > CPU_THRESHOLD:
+        logger.warning(
+            "High CPU (%.1f%%). Sleeping %.1fs", cpu_usage, THROTTLE_DELAY_HIGH_CPU
+        )
+        time.sleep(THROTTLE_DELAY_HIGH_CPU)
+    elif mem_usage > RAM_THRESHOLD:
+        logger.warning(
+            "High RAM (%.1f%%). Running GC then sleeping %.1fs",
+            mem_usage,
+            THROTTLE_DELAY_HIGH_CPU,
+        )
+        gc.collect()
+        time.sleep(THROTTLE_DELAY_HIGH_CPU)
+    elif THROTTLE_DELAY:
+        time.sleep(THROTTLE_DELAY)
+
+
+# ---------------------------------------------------------------------------
+# Table bootstrap
+# ---------------------------------------------------------------------------
+
+def _effective_int_columns(manifest) -> list:
+    """
+    Merge env-configured INT_COLUMNS with manifest-inferred integer columns.
+    Explicit env config always wins.  If INT_COLUMNS is empty and a manifest
+    is present, auto-populate from INT32/INT64 columns with density >= 50%.
+    """
+    if INT_COLUMNS:
+        return INT_COLUMNS
+    if manifest is not None:
+        inferred = infer_int_columns(manifest, density_threshold=50.0)
+        if inferred:
+            logger.info(
+                "INT_COLUMNS auto-populated from manifest (%d cols): %s%s",
+                len(inferred),
+                inferred[:10],
+                "..." if len(inferred) > 10 else "",
+            )
+        return inferred
+    return []
+
+
+def _create_table_if_missing(engine, manifest=None) -> list:
+    """
+    Ensure the target table exists and return its ordered column list.
+
+    Schema resolution order:
+      1. Table already in DB   -> return existing columns unchanged.
+      2. Go manifest available -> build schema from manifest (zero sample I/O).
+      3. Fallback              -> stream a small sample chunk and infer dtypes.
+    """
     cols = get_table_columns(engine, DB_TABLE)
     if cols:
         return cols
 
-    logger.info("Table '%s' missing. Inferring schema from parquet files...", DB_TABLE)
-    all_cols = get_full_schema_from_parquet(PARQUET_DIR)
-    if not all_cols:
-        raise RuntimeError("No parquet schema found to create table")
+    logger.info("Table '%s' missing — bootstrapping schema.", DB_TABLE)
 
-    # get a small sample to infer dtypes after processing
-    sample_iter = stream_parquet_chunks(PARQUET_DIR, max(100, CHUNK_SIZE))
-    sample = next(sample_iter, None)
-    if sample is None:
-        raise RuntimeError("No data found in parquet files to infer schema")
+    if manifest is not None:
+        logger.info("Using Go manifest for schema (no sample chunk needed).")
+        schema_df = build_schema_df(manifest)
+    else:
+        logger.info("No manifest present; inferring schema from parquet sample.")
+        all_cols = get_full_schema_from_parquet(PARQUET_DIR)
+        if not all_cols:
+            raise RuntimeError("No parquet schema found to create table")
 
-    processed = process_chunk(sample, int_columns=INT_COLUMNS)
+        sample_iter = stream_parquet_chunks(PARQUET_DIR, max(100, CHUNK_SIZE))
+        sample = next(sample_iter, None)
+        if sample is None:
+            raise RuntimeError("No data found in parquet files to infer schema")
 
-    # Build empty DataFrame with columns from all_cols and dtypes from processed where available
-    schema_df = pd.DataFrame(columns=all_cols)
-    for c in processed.columns:
-        if c in schema_df.columns:
-            try:
-                schema_df[c] = schema_df[c].astype(processed[c].dtype)
-            except Exception:
-                pass
+        processed = process_chunk(sample, int_columns=_effective_int_columns(manifest))
+
+        schema_df = pd.DataFrame(columns=all_cols)
+        for c in processed.columns:
+            if c in schema_df.columns:
+                try:
+                    schema_df[c] = schema_df[c].astype(processed[c].dtype)
+                except Exception:
+                    pass
 
     create_table_from_df(engine, DB_TABLE, schema_df)
     return get_table_columns(engine, DB_TABLE)
 
+
+# ---------------------------------------------------------------------------
+# Main entry point
+# ---------------------------------------------------------------------------
+
 def ingest_data():
+    """
+    Stream every parquet file in PARQUET_DIR into the target PostgreSQL table.
+
+    Parallelism model
+    -----------------
+    Chunks are read and transformed in parallel batches of size PARALLELISM
+    using a ThreadPoolExecutor (overlaps I/O-bound parquet reads with
+    CPU-bound transforms).  DB inserts remain serial — one connection, in
+    order, no contention.
+    """
     engine = create_engine(DATABASE_URL)
 
-    # Ensure table exists (and return final db columns)
-    db_cols = _create_table_if_missing(engine)
+    # Load Go manifest if available (returns None gracefully when absent)
+    manifest = load_manifest(MANIFEST_FILE)
+
+    eff_int_cols = _effective_int_columns(manifest)
+
+    db_cols = _create_table_if_missing(engine, manifest=manifest)
+
+    # Fetch DB schema map once — used by coerce_df_to_schema inside the loop
+    schema_map = get_table_schema(engine, DB_TABLE)
 
     total_rows = 0
     metrics_history = []
+    chunk_idx = 0  # monotonic counter across all batches
 
-    # fetch schema_map once (outside the loop)
-    schema_map = get_table_schema(engine, DB_TABLE)
+    with ThreadPoolExecutor(max_workers=PARALLELISM) as executor:
+        for batch in _batched(stream_parquet_chunks(PARQUET_DIR, CHUNK_SIZE), PARALLELISM):
 
-    for i, chunk in enumerate(stream_parquet_chunks(PARQUET_DIR, CHUNK_SIZE)):
-        start = time.time()
-        try:
-            df = process_chunk(chunk, int_columns=INT_COLUMNS)
+            # Submit transforms for every chunk in this batch concurrently
+            # Use a list to preserve submission order for ordered inserts
+            futures = [
+                executor.submit(_transform_one, chunk, eff_int_cols)
+                for chunk in batch
+            ]
 
-            # Align schema column order
-            if db_cols:
-                df = df.reindex(columns=db_cols)
+            for future in futures:
+                start = time.time()
+                df = None
+                try:
+                    df = future.result()
 
-            # Coerce data types to match DB schema
-            try:
-                df = coerce_df_to_schema(df, schema_map)
-            except Exception:
-                logger.exception("Schema coercion failed for chunk %d; proceeding with original df", i)
-            
-            # Insert
-            copy_insert(engine, df, DB_TABLE)
+                    if db_cols:
+                        df = df.reindex(columns=db_cols)
 
-            metrics = track_metrics(start, len(df))
-            persist_metrics(metrics)
-            metrics_history.append(metrics)
+                    try:
+                        df = coerce_df_to_schema(df, schema_map)
+                    except Exception:
+                        logger.exception(
+                            "Schema coercion failed for chunk %d; proceeding with original df",
+                            chunk_idx,
+                        )
 
-            total_rows += len(df)
-            logger.info("Chunk %d processed (%d rows). Total: %d", i, len(df), total_rows)
+                    copy_insert(engine, df, DB_TABLE)
 
-            # Resource Throttling (CPU & RAM) 
-            cpu_usage = psutil.cpu_percent(interval=None)
-            mem_usage = psutil.virtual_memory().percent
+                    metrics = track_metrics(start, len(df))
+                    persist_metrics(metrics)
+                    metrics_history.append(metrics)
 
-            if cpu_usage > CPU_THRESHOLD:
-                logger.warning(
-                    "High CPU detected (%.1f%%). Sleeping %ss", 
-                    cpu_usage, THROTTLE_DELAY_HIGH_CPU
-                )
-                time.sleep(THROTTLE_DELAY_HIGH_CPU)
-            
-            elif mem_usage > RAM_THRESHOLD:
-                logger.warning(
-                    "High Memory detected (%.1f%%). Sleeping %ss to allow GC", 
-                    mem_usage, THROTTLE_DELAY_HIGH_CPU
-                )
-                # Force garbage collection to free up memory before next chunk
-                import gc
-                gc.collect()
-                time.sleep(THROTTLE_DELAY_HIGH_CPU)
+                    total_rows += len(df)
+                    logger.info(
+                        "Chunk %d processed (%d rows). Total: %d",
+                        chunk_idx,
+                        len(df),
+                        total_rows,
+                    )
 
-            else:
-                if THROTTLE_DELAY:
-                    time.sleep(THROTTLE_DELAY)
+                    _throttle_if_needed(
+                        psutil.cpu_percent(interval=None),
+                        psutil.virtual_memory().percent,
+                    )
 
-        except Exception as e:
-            logger.exception("Failed to ingest chunk %d: %s", i, e)
-            try:
-                save_failed_chunk(df if 'df' in locals() else pd.DataFrame(), i)
-            except Exception:
-                logger.exception("Could not save failed chunk %d", i)
-            continue
+                except Exception as e:
+                    logger.exception("Failed to ingest chunk %d: %s", chunk_idx, e)
+                    try:
+                        save_failed_chunk(df if df is not None else pd.DataFrame(), chunk_idx)
+                    except Exception:
+                        logger.exception("Could not save failed chunk %d", chunk_idx)
+
+                finally:
+                    chunk_idx += 1
 
     logger.info("Ingestion complete. Rows processed: %d", total_rows)
-
     return metrics_history

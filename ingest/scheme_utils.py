@@ -60,8 +60,3 @@ def coerce_df_to_schema(df: pd.DataFrame, schema_map: dict) -> pd.DataFrame:
 
         # otherwise: leave column as-is (string/text)
     return df
-
-''' simple stats for logging
-converted_nas = df.isna().sum().sum()
-logger.debug("Chunk %d after coercion: %d rows, %d NAs introduced", i, len(df), int(converted_nas))
-'''

@@ -11,9 +11,18 @@
 // Concurrency relies on Go channels rather than shared-memory locking.
 // Database storage estimates are derived from tuple header and null bitmap
 // assumptions to approximate PostgreSQL row-based overhead.
+//
+// Flags:
+//
+//	--json   Emit a JSON manifest to stdout instead of the human-readable report.
+//	         Redirect the output to schema_manifest.json and point the Python
+//	         pipeline at it via MANIFEST_FILE= in your .env to skip sample-chunk
+//	         schema inference entirely.
 package main
 
 import (
+	"encoding/json"
+	"flag"
 	"fmt"
 	"io"
 	"os"
@@ -27,8 +36,6 @@ import (
 )
 
 // ColStat aggregates metadata for a single column across all processed files.
-// PhysicalType and LogicalType describe schema characteristics, while the
-// counters accumulate value and null totals from each row group.
 type ColStat struct {
 	PhysicalType string
 	LogicalType  string
@@ -46,8 +53,7 @@ type FileResult struct {
 	ColStats  map[string]*ColStat
 }
 
-// Totals holds global aggregation state owned exclusively by the aggregator
-// goroutine. Because a single consumer mutates this struct, no mutex is needed.
+// Totals holds global aggregation state owned exclusively by the aggregator goroutine.
 type Totals struct {
 	Files       int64
 	FailedFiles int64
@@ -57,8 +63,35 @@ type Totals struct {
 	Columns     map[string]*ColStat
 }
 
-// inspect parses parquet metadata and returns a FileResult describing the file.
-// The function is stateless and safe for concurrent execution by multiple workers.
+// --- JSON manifest structs (used when --json flag is set) ---
+
+type colManifest struct {
+	PhysicalType string  `json:"physical_type"`
+	LogicalType  string  `json:"logical_type"`
+	TotalValues  int64   `json:"total_values"`
+	TotalNulls   int64   `json:"total_nulls"`
+	DensityPct   float64 `json:"density_pct"`
+}
+
+type storageEstimateGB struct {
+	ParquetGB       float64 `json:"parquet_gb"`
+	PGOverheadGB    float64 `json:"pg_overhead_gb"`
+	PGUnoptimisedGB float64 `json:"pg_unoptimised_gb"`
+	PGOptimisedGB   float64 `json:"pg_optimised_gb"`
+}
+
+type manifest struct {
+	ValidFiles      int64                    `json:"valid_files"`
+	FailedFiles     int64                    `json:"failed_files"`
+	TotalRows       int64                    `json:"total_rows"`
+	TotalSizeBytes  int64                    `json:"total_size_bytes"`
+	ElapsedSec      float64                  `json:"elapsed_sec"`
+	StorageEstimate storageEstimateGB        `json:"storage_estimate_gb"`
+	Columns         map[string]*colManifest  `json:"columns"`
+}
+
+// inspect parses parquet metadata and returns a FileResult.
+// The function is stateless and safe for concurrent execution.
 func inspect(path string) FileResult {
 	res := FileResult{
 		ColStats: make(map[string]*ColStat),
@@ -78,7 +111,6 @@ func inspect(path string) FileResult {
 	}
 	res.SizeBytes = stat.Size()
 
-	// SectionReader provides a ReaderAt implementation compatible with Windows.
 	sr := io.NewSectionReader(f, 0, stat.Size())
 
 	r, err := file.NewParquetReader(sr)
@@ -98,7 +130,6 @@ func inspect(path string) FileResult {
 	res.Rows = meta.NumRows
 	res.RowGroups = int64(len(meta.RowGroups))
 
-	// Schema columns are 0-indexed.
 	for i := 0; i < schema.NumColumns(); i++ {
 		col := schema.Column(i)
 		name := col.Name()
@@ -110,18 +141,13 @@ func inspect(path string) FileResult {
 		}
 
 		var vals, nulls int64
-
-		// Aggregate statistics from each row group.
 		for rg := 0; rg < len(meta.RowGroups); rg++ {
 			rgMeta := meta.RowGroup(rg)
-
 			colChunk, err := rgMeta.ColumnChunk(i)
 			if err != nil {
 				continue
 			}
-
 			vals += colChunk.NumValues()
-
 			stats, err := colChunk.Statistics()
 			if err == nil && stats != nil && stats.HasNullCount() {
 				nulls += stats.NullCount()
@@ -139,8 +165,6 @@ func inspect(path string) FileResult {
 	return res
 }
 
-// worker consumes paths from jobs and emits inspection results.
-// Multiple workers run concurrently and act as producers to the results channel.
 func worker(jobs <-chan string, results chan<- FileResult, wg *sync.WaitGroup) {
 	defer wg.Done()
 	for p := range jobs {
@@ -148,15 +172,22 @@ func worker(jobs <-chan string, results chan<- FileResult, wg *sync.WaitGroup) {
 	}
 }
 
-// main wires the producer, worker pool, and aggregator pipeline, then prints
-// column density metrics and PostgreSQL storage estimations.
 func main() {
-	if len(os.Args) < 2 {
-		fmt.Println("usage: go run main.go <folder>")
+	// FIX: was using os.Args directly; flag package allows --json anywhere
+	jsonFlag := flag.Bool("json", false, "emit JSON manifest to stdout instead of human-readable report")
+	flag.Usage = func() {
+		fmt.Fprintln(os.Stderr, "usage: go run main.go [--json] <folder>")
+		flag.PrintDefaults()
+	}
+	flag.Parse()
+
+	args := flag.Args()
+	if len(args) < 1 {
+		flag.Usage()
 		os.Exit(1)
 	}
 
-	root := os.Args[1]
+	root := args[0]
 	start := time.Now()
 	numWorkers := runtime.NumCPU()
 
@@ -168,7 +199,7 @@ func main() {
 		Columns: make(map[string]*ColStat),
 	}
 
-	// Aggregator: single consumer responsible for merging results.
+	// Aggregator: single consumer — no mutex needed (MPSC).
 	aggDone := make(chan struct{})
 	go func() {
 		for res := range results {
@@ -195,13 +226,11 @@ func main() {
 		close(aggDone)
 	}()
 
-	// Start worker pool sized to available CPUs.
 	wg.Add(numWorkers)
-	for range numWorkers {
+	for i := 0; i < numWorkers; i++ {
 		go worker(jobs, results, &wg)
 	}
 
-	// Producer: walk directory tree and enqueue parquet files.
 	err := filepath.WalkDir(root, func(p string, d os.DirEntry, err error) error {
 		if err != nil || d.IsDir() {
 			return nil
@@ -212,7 +241,7 @@ func main() {
 		return nil
 	})
 	if err != nil {
-		fmt.Printf("Error walking directory: %v\n", err)
+		fmt.Fprintf(os.Stderr, "Error walking directory: %v\n", err)
 		os.Exit(1)
 	}
 
@@ -223,23 +252,30 @@ func main() {
 
 	elapsed := time.Since(start)
 
-	// Sort column names for deterministic output ordering.
+	// --- Shared storage math ---
+
 	var colNames []string
 	for name := range totals.Columns {
 		colNames = append(colNames, name)
 	}
 	sort.Strings(colNames)
 
-	fmt.Println("\n_____COLUMN DENSITY REPORT_____")
+	var totalRawDataBytes, totalDictDataBytes int64
 
-	var totalRawDataBytes int64
-	var totalDictDataBytes int64
+	type colResult struct {
+		name     string
+		stat     *ColStat
+		density  float64
+		nonNulls int64
+		rawBytes int64
+		dictBytes int64
+	}
 
+	colResults := make([]colResult, 0, len(colNames))
 	for _, name := range colNames {
 		stat := totals.Columns[name]
-
-		density := 0.0
 		nonNulls := stat.TotalValues - stat.TotalNulls
+		density := 0.0
 		if stat.TotalValues > 0 {
 			density = float64(nonNulls) / float64(stat.TotalValues) * 100
 		}
@@ -266,14 +302,11 @@ func main() {
 		totalRawDataBytes += rawBytes
 		totalDictDataBytes += dictBytes
 
-		fmt.Printf("- %-30s | %-10s | %-10s | Density: %6.2f%% (Vals: %d, Nulls: %d)\n",
-			name,
-			stat.PhysicalType,
-			stat.LogicalType,
-			density,
-			stat.TotalValues,
-			stat.TotalNulls,
-		)
+		colResults = append(colResults, colResult{
+			name: name, stat: stat,
+			density: density, nonNulls: nonNulls,
+			rawBytes: rawBytes, dictBytes: dictBytes,
+		})
 	}
 
 	numCols := int64(len(totals.Columns))
@@ -285,7 +318,54 @@ func main() {
 	gb := float64(1024 * 1024 * 1024)
 	parquetGB := float64(totals.SizeBytes) / gb
 	pgRawGB := float64(pgTotalOverhead+totalRawDataBytes) / gb
-	pgOptimizedGB := float64(pgTotalOverhead+totalDictDataBytes) / gb
+	pgOptimisedGB := float64(pgTotalOverhead+totalDictDataBytes) / gb
+	pgOverheadGB := float64(pgTotalOverhead) / gb
+
+	// --- Output ---
+
+	if *jsonFlag {
+		// Emit JSON manifest consumed by the Python ingest pipeline.
+		m := manifest{
+			ValidFiles:     totals.Files,
+			FailedFiles:    totals.FailedFiles,
+			TotalRows:      totals.Rows,
+			TotalSizeBytes: totals.SizeBytes,
+			ElapsedSec:     elapsed.Seconds(),
+			StorageEstimate: storageEstimateGB{
+				ParquetGB:       parquetGB,
+				PGOverheadGB:    pgOverheadGB,
+				PGUnoptimisedGB: pgRawGB,
+				PGOptimisedGB:   pgOptimisedGB,
+			},
+			Columns: make(map[string]*colManifest, len(colResults)),
+		}
+		for _, cr := range colResults {
+			m.Columns[cr.name] = &colManifest{
+				PhysicalType: cr.stat.PhysicalType,
+				LogicalType:  cr.stat.LogicalType,
+				TotalValues:  cr.stat.TotalValues,
+				TotalNulls:   cr.stat.TotalNulls,
+				DensityPct:   cr.density,
+			}
+		}
+		enc := json.NewEncoder(os.Stdout)
+		enc.SetIndent("", "  ")
+		if err := enc.Encode(m); err != nil {
+			fmt.Fprintf(os.Stderr, "JSON encode error: %v\n", err)
+			os.Exit(1)
+		}
+		return
+	}
+
+	// Human-readable report (original behaviour, unchanged)
+	fmt.Println("\n_____COLUMN DENSITY REPORT_____")
+	for _, cr := range colResults {
+		fmt.Printf(
+			"- %-30s | %-10s | %-10s | Density: %6.2f%% (Vals: %d, Nulls: %d)\n",
+			cr.name, cr.stat.PhysicalType, cr.stat.LogicalType,
+			cr.density, cr.stat.TotalValues, cr.stat.TotalNulls,
+		)
+	}
 
 	fmt.Println("\n_____TOTALS_____")
 	fmt.Printf("Valid Files:   %d\n", totals.Files)
@@ -296,7 +376,7 @@ func main() {
 
 	fmt.Println("\n_____STORAGE ESTIMATION_____")
 	fmt.Printf("Current Parquet Disk Size:       %.2f GB (Highly compressed, columnar)\n", parquetGB)
-	fmt.Printf("Est. PG Overhead (Tuples/Nulls): %.2f GB (Just headers & null bitmaps!)\n", float64(pgTotalOverhead)/gb)
+	fmt.Printf("Est. PG Overhead (Tuples/Nulls): %.2f GB (Just headers & null bitmaps!)\n", pgOverheadGB)
 	fmt.Printf("Est. PG Unoptimized (Strings):   ~%.2f GB (Row-based, text columns)\n", pgRawGB)
-	fmt.Printf("Est. PG Optimized (WoRMS/Dict):  ~%.2f GB (Row-based, INT dimension tables)\n", pgOptimizedGB)
+	fmt.Printf("Est. PG Optimized (WoRMS/Dict):  ~%.2f GB (Row-based, INT dimension tables)\n", pgOptimisedGB)
 }
