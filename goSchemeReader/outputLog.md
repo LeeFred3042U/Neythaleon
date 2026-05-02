@@ -5,7 +5,7 @@ _____COLUMN DENSITY REPORT_____
 - DNA_sequence                   | BYTE_ARRAY | String     | Density:  11.37% (Vals: 223670000, Nulls: 198245587)
 - _16s_recover                   | BYTE_ARRAY | String     | Density:   0.00% (Vals: 223670000, Nulls: 223670000)
 - _16s_recover_software          | BYTE_ARRAY | String     | Density:   0.00% (Vals: 223670000, Nulls: 223670000)
-- _event_id                      | BYTE_ARRAY | String     | Density:  74.36% (Vals: 880598719, Nulls: 225767953)
+- _event_id                      | BYTE_ARRAY | String     | Density:  75.36% (Vals: 880598719, Nulls: 225767953)
 - _id                            | BYTE_ARRAY | String     | Density:  83.41% (Vals: 880598719, Nulls: 146051541)
 - _occurrence_id                 | BYTE_ARRAY | String     | Density:  27.55% (Vals: 880598719, Nulls: 637990048)
 - absence                        | BOOLEAN    | None       | Density: 100.00% (Vals: 223075869, Nulls: 0)

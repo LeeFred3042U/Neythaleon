@@ -1,11 +1,5 @@
 # Neythaleon
 
-**Neythaleon** is an efficient, dependency-light data ingestion and observability toolkit for marine biodiversity datasets. Originally built for OBIS datasets, it ingests `.parquet` files, performs a robust cleaning pipeline, streams the data to PostgreSQL, and tracks detailed system metrics.
-
-> _"The Eye Below Logs Everything."_
-
----
-
 ## Features
 
 - **Efficient Ingestion:** Ingests large `.parquet` files in memory-safe chunks using DuckDB.
@@ -195,4 +189,452 @@ Building observable and reproducible data pipelines is fundamental to reliable d
 ## ⚓ Quote That Hit Different
 > "The sea, once it casts its spell, holds one in its net of wonder forever."
    — Jacques Cousteau
+---# Neythaleon
+
+**Neythaleon** is a memory-safe, observable data ingestion toolkit for large scientific Parquet datasets. Originally built for OBIS marine biodiversity data, it streams `.parquet` files into PostgreSQL in configurable chunks, applies a multi-step cleaning pipeline, and produces a performance dashboard automatically after ingestion.
+
+> _"The Eye Below Logs Everything."_
+
 ---
+
+## Features
+
+- **Go Schema Profiler:** Scans an entire Parquet dataset in seconds by reading only file metadata — no row materialisation. Produces a JSON manifest that drives the Python pipeline.
+- **Manifest-Driven Ingestion:** When a Go manifest is present, table creation requires zero sample I/O. Column types and integer candidates are inferred directly from the manifest.
+- **Parallel Transform:** Chunks are transformed concurrently via `ThreadPoolExecutor` (controlled by `PARALLELISM`), overlapping I/O-bound reads with CPU-bound cleaning.
+- **High-Performance Loading:** Uses PostgreSQL's native `COPY` protocol for bulk insertion, with a `to_sql` fallback on failure.
+- **Robust ETL:** Handles null bytes, special characters, WKB geometry, integer coercion, and nullable types in a fixed pipeline per chunk.
+- **Adaptive Throttling:** Polls CPU and RAM after every chunk. Sleeps and optionally GCs when thresholds are exceeded.
+- **Fault Isolation:** Failed chunks are written to `failed_chunks/` as CSV files. The run always continues.
+- **Automatic Observability:** Every chunk appends a row to `media/ingestion_metrics.csv`. A four-panel PNG dashboard is generated immediately after ingestion completes.
+
+---
+
+## Architecture
+
+```
+goSchemeReader/main.go                     (optional pre-flight, run once)
+  WalkDir → jobs chan → N workers → aggregator goroutine
+  Reads Parquet footers only — never materialises rows
+  Output: schema_manifest.json  (--json flag)
+
+main.py
+  ├── ingest_main()
+  │     load_manifest()           ← schema_manifest.json (if present)
+  │     _create_table_if_missing()
+  │       ├── manifest path: build_schema_df()   (no sample I/O)
+  │       └── fallback path: stream sample chunk, infer dtypes
+  │     ThreadPoolExecutor(PARALLELISM workers)
+  │       for batch in stream_parquet_chunks():
+  │         futures = [submit(process_chunk) for chunk in batch]
+  │         for future in futures:
+  │           df = future.result()
+  │           df.reindex(db_cols)
+  │           coerce_df_to_schema(df, schema_map)
+  │           copy_insert()  →  PostgreSQL (COPY) or to_sql fallback
+  │           track_metrics() → persist_metrics() → media/*.csv
+  │           throttle_if_needed()
+  │           on error: save_failed_chunk() → failed_chunks/
+  └── plot_main()
+        read_metrics_fuzzy(media/)
+        create_single_png()  →  media/dashboard_yellow.png
+```
+
+### Transform pipeline (per chunk, in fixed order)
+
+1. Strip null bytes (`\x00`) from string columns — vectorised
+2. Sanitise special characters (`\n`, `\r`, `\t` → space) — regex
+3. Coerce integer columns to nullable `Int64` — from `INT_COLUMNS` or manifest inference
+4. Decode WKB binary geometry → WKT text via Shapely
+
+---
+
+## Go + Python Integration
+
+The Go tool and Python pipeline are designed to work together. Run the Go tool once before ingestion to generate the manifest; subsequent runs consume it automatically.
+
+```bash
+# Step 1 — profile the dataset (reads metadata only, ~25s for 51 GB)
+go run goSchemeReader/main.go --json ./parquet_files > schema_manifest.json
+
+# Step 2 — ingest using the manifest (skips sample-chunk schema inference)
+python main.py
+```
+
+Set `MANIFEST_FILE=schema_manifest.json` in your `.env` (it is the default). Leave `INT_COLUMNS` empty to let the manifest auto-populate integer columns from physical-type `INT32`/`INT64` columns with ≥50% density.
+
+To view the human-readable schema report instead of producing a manifest:
+
+```bash
+go run goSchemeReader/main.go ./parquet_files
+```
+
+---
+
+## 📊 Sample Dashboards
+
+> Dashboards are generated automatically from `media/ingestion_metrics.csv` at the end of every run.
+
+### 1. OBIS Marine Biodiversity Data
+![OBIS Performance Dashboard](media/metrics_dashboard_2.png)
+*Stable throughput of ~11,000 rows/sec. Low CPU indicates an I/O-bound, efficient process.*
+
+### 2. NYC For-Hire Vehicle (FHV) Data
+![FHV Performance Dashboard](media/metrics_dashboard_1.png)
+*Consistent ~9,000 rows/sec with uniform batch processing times.*
+
+### 3. NYC Yellow Taxi Data
+![NYC Taxi Performance Dashboard](media/metrics_dashboard_3.png)
+*Ramp-up behaviour visible, peaking at ~2,700 rows/sec. Positive CPU–throughput correlation.*
+
+---
+
+## 📁 File Structure
+
+```
+Neythaleon/
+├── .env.example                    # copy to .env and edit
+├── main.py                         # orchestrator: ingest → plot
+├── requirements.txt
+├── schema_manifest.json            # produced by: go run goSchemeReader/main.go --json <dir>
+│
+├── goSchemeReader/
+│   ├── main.go                     # Go CLI: schema profiler + storage estimator
+│   ├── README.md                   # goSchemeReader-specific docs
+│   └── outputLog.md                # sample output from the full OBIS dataset
+│
+├── ingest/
+│   ├── cli.py                      # argparse entry point (--debug flag)
+│   ├── config.py                   # env loading; all typed config values
+│   ├── logging_config.py           # dual-sink logging (stdout + file)
+│   ├── ingest_runner.py            # orchestration loop (stream → transform → insert)
+│   ├── manifest.py                 # loads Go manifest; drives schema and INT_COLUMNS
+│   ├── db_utils.py                 # table inspect, COPY insert, failed-chunk save
+│   ├── parquet_utils.py            # chunk streaming (PyArrow) + schema union
+│   ├── transform.py                # process_chunk: null bytes, chars, ints, geometry
+│   ├── scheme_utils.py             # coerce_df_to_schema: DB-type-aware coercion
+│   └── metrics.py                  # track_metrics + persist_metrics (append-only CSV)
+│
+├── plot/
+│   ├── cli.py                      # reads media/*.csv, calls dashboard
+│   ├── dashboard.py                # create_single_png (2×2 layout)
+│   ├── metrics_loader.py           # fuzzy CSV reader with numeric coercion
+│   └── plotting_panels.py          # 4 panels: throughput, CPU scatter, memory, batch time
+│
+├── parquet_files/                  # place your .parquet files here (PARQUET_DIR default)
+│   └── *.parquet
+│
+├── media/                          # output: metrics CSV + dashboard PNGs
+│   ├── ingestion_metrics.csv
+│   └── dashboard_yellow.png
+│
+└── failed_chunks/                  # CSVs written when a chunk fails; run continues
+    └── failed_chunk_<n>.csv
+```
+
+---
+
+## 🔧 Requirements
+
+- **Python** 3.10+
+- **Go** 1.21+ (for `goSchemeReader` only)
+- **PostgreSQL** (any recent version)
+
+### Python dependencies
+
+```bash
+pip install -r requirements.txt
+```
+
+Key packages: `pandas`, `pyarrow`, `duckdb`, `sqlalchemy`, `psycopg2-binary`, `shapely`, `psutil`, `matplotlib`, `python-dotenv`
+
+---
+
+## Configuration
+
+Copy the template and edit:
+
+```bash
+cp .env.example .env
+```
+
+### All variables
+
+| Variable | Default | Description |
+|---|---|---|
+| `DATABASE_URL` | _(required)_ | PostgreSQL connection string |
+| `DB_TABLE` | `ingested_data` | Target table name; created automatically if absent |
+| `PARQUET_DIR` | `parquet_files` | Folder containing `.parquet` input files |
+| `FAILED_DIR` | `failed_chunks` | Destination for chunk-failure CSVs |
+| `MEDIA_DIR` | `media` | Output folder for metrics CSV and dashboard PNG |
+| `CHUNK_SIZE` | `10000` | Rows per batch; keep ≤20,000 to avoid OOM warnings |
+| `PARALLELISM` | `4` | ThreadPoolExecutor workers for concurrent transforms |
+| `VALIDATE_COORDS` | `false` | Read by config; coordinate validation hook (not yet implemented) |
+| `INT_COLUMNS` | _(empty)_ | Comma-separated column names to coerce to `Int64`; auto-populated from manifest when empty |
+| `MANIFEST_FILE` | `schema_manifest.json` | Path to Go manifest; skips sample-chunk inference when present |
+| `METRICS_FILE` | `media/ingestion_metrics.csv` | Append-only metrics log |
+| `LOG_FILE` | `ingestion.log` | File log destination |
+| `CPU_THRESHOLD` | `85` | CPU % above which the loop sleeps |
+| `THROTTLE_DELAY_HIGH_CPU` | `2` | Seconds to sleep under high CPU or RAM |
+| `THROTTLE_DELAY` | `0` | Baseline delay between chunks (seconds) |
+
+---
+
+## Datasets
+
+Originally designed for **OBIS** (Ocean Biodiversity Information System) — 223 million rows, 419 columns, 51 GB compressed. Also validated against:
+
+- **NYC TLC** Yellow Taxi and For-Hire Vehicle records — tests non-geospatial schemas
+- **GBIF / USGS** — confirms coordinate and taxonomy field handling
+
+### Citations
+
+**Ocean Biodiversity Information System**
+> OBIS (2025). *Global distribution records from the OBIS database*. Intergovernmental Oceanographic Commission of UNESCO. [obis.org](https://obis.org/data/access/)
+
+**New York City TLC**
+> New York City Taxi and Limousine Commission. (2025). *Yellow Taxi Trip Records* and *For-Hire Vehicle Trip Records*. [nyc.gov](https://www.nyc.gov/site/tlc/about/tlc-trip-record-data.page)
+
+---
+
+## Why This Matters
+
+Large scientific datasets — OBIS, GBIF, NASA Earthdata — are published as Parquet but consumed in PostgreSQL for SQL analysis. Naive approaches OOM or produce wrong types. Neythaleon solves this by combining a zero-materialisation Go profiler, a memory-bounded Python streaming pipeline, and automatic observability into a single, runnable tool.
+
+---
+
+## 🪪 License
+
+- Code: MIT
+- Data: CC0 1.0
+
+---
+
+## ⚓ Quote That Hit Different
+
+> "The sea, once it casts its spell, holds one in its net of wonder forever."
+> — Jacques Cousteau# Neythaleon
+
+**Neythaleon** is a memory-safe, observable data ingestion toolkit for large scientific Parquet datasets. Originally built for OBIS marine biodiversity data, it streams `.parquet` files into PostgreSQL in configurable chunks, applies a multi-step cleaning pipeline, and produces a performance dashboard automatically after ingestion.
+
+> _"The Eye Below Logs Everything."_
+
+---
+
+## Features
+
+- **Go Schema Profiler:** Scans an entire Parquet dataset in seconds by reading only file metadata — no row materialisation. Produces a JSON manifest that drives the Python pipeline.
+- **Manifest-Driven Ingestion:** When a Go manifest is present, table creation requires zero sample I/O. Column types and integer candidates are inferred directly from the manifest.
+- **Parallel Transform:** Chunks are transformed concurrently via `ThreadPoolExecutor` (controlled by `PARALLELISM`), overlapping I/O-bound reads with CPU-bound cleaning.
+- **High-Performance Loading:** Uses PostgreSQL's native `COPY` protocol for bulk insertion, with a `to_sql` fallback on failure.
+- **Robust ETL:** Handles null bytes, special characters, WKB geometry, integer coercion, and nullable types in a fixed pipeline per chunk.
+- **Adaptive Throttling:** Polls CPU and RAM after every chunk. Sleeps and optionally GCs when thresholds are exceeded.
+- **Fault Isolation:** Failed chunks are written to `failed_chunks/` as CSV files. The run always continues.
+- **Automatic Observability:** Every chunk appends a row to `media/ingestion_metrics.csv`. A four-panel PNG dashboard is generated immediately after ingestion completes.
+
+---
+
+## Architecture
+
+```
+goSchemeReader/main.go                     (optional pre-flight, run once)
+  WalkDir → jobs chan → N workers → aggregator goroutine
+  Reads Parquet footers only — never materialises rows
+  Output: schema_manifest.json  (--json flag)
+
+main.py
+  ├── ingest_main()
+  │     load_manifest()           ← schema_manifest.json (if present)
+  │     _create_table_if_missing()
+  │       ├── manifest path: build_schema_df()   (no sample I/O)
+  │       └── fallback path: stream sample chunk, infer dtypes
+  │     ThreadPoolExecutor(PARALLELISM workers)
+  │       for batch in stream_parquet_chunks():
+  │         futures = [submit(process_chunk) for chunk in batch]
+  │         for future in futures:
+  │           df = future.result()
+  │           df.reindex(db_cols)
+  │           coerce_df_to_schema(df, schema_map)
+  │           copy_insert()  →  PostgreSQL (COPY) or to_sql fallback
+  │           track_metrics() → persist_metrics() → media/*.csv
+  │           throttle_if_needed()
+  │           on error: save_failed_chunk() → failed_chunks/
+  └── plot_main()
+        read_metrics_fuzzy(media/)
+        create_single_png()  →  media/dashboard_yellow.png
+```
+
+### Transform pipeline (per chunk, in fixed order)
+
+1. Strip null bytes (`\x00`) from string columns — vectorised
+2. Sanitise special characters (`\n`, `\r`, `\t` → space) — regex
+3. Coerce integer columns to nullable `Int64` — from `INT_COLUMNS` or manifest inference
+4. Decode WKB binary geometry → WKT text via Shapely
+
+---
+
+## Go + Python Integration
+
+The Go tool and Python pipeline are designed to work together. Run the Go tool once before ingestion to generate the manifest; subsequent runs consume it automatically.
+
+```bash
+# Step 1 — profile the dataset (reads metadata only, ~25s for 51 GB)
+go run goSchemeReader/main.go --json ./parquet_files > schema_manifest.json
+
+# Step 2 — ingest using the manifest (skips sample-chunk schema inference)
+python main.py
+```
+
+Set `MANIFEST_FILE=schema_manifest.json` in your `.env` (it is the default). Leave `INT_COLUMNS` empty to let the manifest auto-populate integer columns from physical-type `INT32`/`INT64` columns with ≥50% density.
+
+To view the human-readable schema report instead of producing a manifest:
+
+```bash
+go run goSchemeReader/main.go ./parquet_files
+```
+
+---
+
+## 📊 Sample Dashboards
+
+> Dashboards are generated automatically from `media/ingestion_metrics.csv` at the end of every run.
+
+### 1. OBIS Marine Biodiversity Data
+![OBIS Performance Dashboard](media/metrics_dashboard_2.png)
+*Stable throughput of ~11,000 rows/sec. Low CPU indicates an I/O-bound, efficient process.*
+
+### 2. NYC For-Hire Vehicle (FHV) Data
+![FHV Performance Dashboard](media/metrics_dashboard_1.png)
+*Consistent ~9,000 rows/sec with uniform batch processing times.*
+
+### 3. NYC Yellow Taxi Data
+![NYC Taxi Performance Dashboard](media/metrics_dashboard_3.png)
+*Ramp-up behaviour visible, peaking at ~2,700 rows/sec. Positive CPU–throughput correlation.*
+
+---
+
+## 📁 File Structure
+
+```
+Neythaleon/
+├── .env.example                    # copy to .env and edit
+├── main.py                         # orchestrator: ingest → plot
+├── requirements.txt
+├── schema_manifest.json            # produced by: go run goSchemeReader/main.go --json <dir>
+│
+├── goSchemeReader/
+│   ├── main.go                     # Go CLI: schema profiler + storage estimator
+│   ├── README.md                   # goSchemeReader-specific docs
+│   └── outputLog.md                # sample output from the full OBIS dataset
+│
+├── ingest/
+│   ├── cli.py                      # argparse entry point (--debug flag)
+│   ├── config.py                   # env loading; all typed config values
+│   ├── logging_config.py           # dual-sink logging (stdout + file)
+│   ├── ingest_runner.py            # orchestration loop (stream → transform → insert)
+│   ├── manifest.py                 # loads Go manifest; drives schema and INT_COLUMNS
+│   ├── db_utils.py                 # table inspect, COPY insert, failed-chunk save
+│   ├── parquet_utils.py            # chunk streaming (PyArrow) + schema union
+│   ├── transform.py                # process_chunk: null bytes, chars, ints, geometry
+│   ├── scheme_utils.py             # coerce_df_to_schema: DB-type-aware coercion
+│   └── metrics.py                  # track_metrics + persist_metrics (append-only CSV)
+│
+├── plot/
+│   ├── cli.py                      # reads media/*.csv, calls dashboard
+│   ├── dashboard.py                # create_single_png (2×2 layout)
+│   ├── metrics_loader.py           # fuzzy CSV reader with numeric coercion
+│   └── plotting_panels.py          # 4 panels: throughput, CPU scatter, memory, batch time
+│
+├── parquet_files/                  # place your .parquet files here (PARQUET_DIR default)
+│   └── *.parquet
+│
+├── media/                          # output: metrics CSV + dashboard PNGs
+│   ├── ingestion_metrics.csv
+│   └── dashboard_yellow.png
+│
+└── failed_chunks/                  # CSVs written when a chunk fails; run continues
+    └── failed_chunk_<n>.csv
+```
+
+---
+
+## 🔧 Requirements
+
+- **Python** 3.10+
+- **Go** 1.21+ (for `goSchemeReader` only)
+- **PostgreSQL** (any recent version)
+
+### Python dependencies
+
+```bash
+pip install -r requirements.txt
+```
+
+Key packages: `pandas`, `pyarrow`, `duckdb`, `sqlalchemy`, `psycopg2-binary`, `shapely`, `psutil`, `matplotlib`, `python-dotenv`
+
+---
+
+## Configuration
+
+Copy the template and edit:
+
+```bash
+cp .env.example .env
+```
+
+### All variables
+
+| Variable | Default | Description |
+|---|---|---|
+| `DATABASE_URL` | _(required)_ | PostgreSQL connection string |
+| `DB_TABLE` | `ingested_data` | Target table name; created automatically if absent |
+| `PARQUET_DIR` | `parquet_files` | Folder containing `.parquet` input files |
+| `FAILED_DIR` | `failed_chunks` | Destination for chunk-failure CSVs |
+| `MEDIA_DIR` | `media` | Output folder for metrics CSV and dashboard PNG |
+| `CHUNK_SIZE` | `10000` | Rows per batch; keep ≤20,000 to avoid OOM warnings |
+| `PARALLELISM` | `4` | ThreadPoolExecutor workers for concurrent transforms |
+| `VALIDATE_COORDS` | `false` | Read by config; coordinate validation hook (not yet implemented) |
+| `INT_COLUMNS` | _(empty)_ | Comma-separated column names to coerce to `Int64`; auto-populated from manifest when empty |
+| `MANIFEST_FILE` | `schema_manifest.json` | Path to Go manifest; skips sample-chunk inference when present |
+| `METRICS_FILE` | `media/ingestion_metrics.csv` | Append-only metrics log |
+| `LOG_FILE` | `ingestion.log` | File log destination |
+| `CPU_THRESHOLD` | `85` | CPU % above which the loop sleeps |
+| `THROTTLE_DELAY_HIGH_CPU` | `2` | Seconds to sleep under high CPU or RAM |
+| `THROTTLE_DELAY` | `0` | Baseline delay between chunks (seconds) |
+
+---
+
+## Datasets
+
+Originally designed for **OBIS** (Ocean Biodiversity Information System) — 223 million rows, 419 columns, 51 GB compressed. Also validated against:
+
+- **NYC TLC** Yellow Taxi and For-Hire Vehicle records — tests non-geospatial schemas
+- **GBIF / USGS** — confirms coordinate and taxonomy field handling
+
+### Citations
+
+**Ocean Biodiversity Information System**
+> OBIS (2025). *Global distribution records from the OBIS database*. Intergovernmental Oceanographic Commission of UNESCO. [obis.org](https://obis.org/data/access/)
+
+**New York City TLC**
+> New York City Taxi and Limousine Commission. (2025). *Yellow Taxi Trip Records* and *For-Hire Vehicle Trip Records*. [nyc.gov](https://www.nyc.gov/site/tlc/about/tlc-trip-record-data.page)
+
+---
+
+## Why This Matters
+
+Large scientific datasets — OBIS, GBIF, NASA Earthdata — are published as Parquet but consumed in PostgreSQL for SQL analysis. Naive approaches OOM or produce wrong types. Neythaleon solves this by combining a zero-materialisation Go profiler, a memory-bounded Python streaming pipeline, and automatic observability into a single, runnable tool.
+
+---
+
+## 🪪 License
+
+- Code: MIT
+- Data: CC0 1.0
+
+---
+
+## ⚓ Quote That Hit Different
+
+> "The sea, once it casts its spell, holds one in its net of wonder forever."
+> — Jacques Cousteau
