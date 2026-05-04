@@ -1,23 +1,3 @@
-// Command inspect-parquet scans a directory tree and aggregates column-level
-// statistics across Parquet files.
-//
-// The program reads Parquet metadata only and never materializes row data.
-// Work is structured as a channel-based pipeline:
-//
-//   - Producer: walks the filesystem and sends parquet paths to `jobs`.
-//   - Workers: inspect files concurrently and emit FileResult values.
-//   - Aggregator: single goroutine that owns Totals and merges results.
-//
-// Concurrency relies on Go channels rather than shared-memory locking.
-// Database storage estimates are derived from tuple header and null bitmap
-// assumptions to approximate PostgreSQL row-based overhead.
-//
-// Flags:
-//
-//	--json   Emit a JSON manifest to stdout instead of the human-readable report.
-//	         Redirect the output to schema_manifest.json and point the Python
-//	         pipeline at it via MANIFEST_FILE= in your .env to skip sample-chunk
-//	         schema inference entirely.
 package main
 
 import (
@@ -35,7 +15,6 @@ import (
 	"github.com/apache/arrow/go/v15/parquet/file"
 )
 
-// ColStat aggregates metadata for a single column across all processed files.
 type ColStat struct {
 	PhysicalType string
 	LogicalType  string
@@ -43,8 +22,6 @@ type ColStat struct {
 	TotalNulls   int64
 }
 
-// FileResult represents the result of inspecting a single parquet file.
-// Workers emit this struct to the aggregator to avoid shared mutable state.
 type FileResult struct {
 	Failed    bool
 	SizeBytes int64
@@ -53,7 +30,6 @@ type FileResult struct {
 	ColStats  map[string]*ColStat
 }
 
-// Totals holds global aggregation state owned exclusively by the aggregator goroutine.
 type Totals struct {
 	Files       int64
 	FailedFiles int64
@@ -62,8 +38,6 @@ type Totals struct {
 	SizeBytes   int64
 	Columns     map[string]*ColStat
 }
-
-// --- JSON manifest structs (used when --json flag is set) ---
 
 type colManifest struct {
 	PhysicalType string  `json:"physical_type"`
@@ -90,8 +64,6 @@ type manifest struct {
 	Columns         map[string]*colManifest  `json:"columns"`
 }
 
-// inspect parses parquet metadata and returns a FileResult.
-// The function is stateless and safe for concurrent execution.
 func inspect(path string) FileResult {
 	res := FileResult{
 		ColStats: make(map[string]*ColStat),
@@ -173,7 +145,6 @@ func worker(jobs <-chan string, results chan<- FileResult, wg *sync.WaitGroup) {
 }
 
 func main() {
-	// FIX: was using os.Args directly; flag package allows --json anywhere
 	jsonFlag := flag.Bool("json", false, "emit JSON manifest to stdout instead of human-readable report")
 	flag.Usage = func() {
 		fmt.Fprintln(os.Stderr, "usage: go run main.go [--json] <folder>")
@@ -199,7 +170,6 @@ func main() {
 		Columns: make(map[string]*ColStat),
 	}
 
-	// Aggregator: single consumer — no mutex needed (MPSC).
 	aggDone := make(chan struct{})
 	go func() {
 		for res := range results {
@@ -251,8 +221,6 @@ func main() {
 	<-aggDone
 
 	elapsed := time.Since(start)
-
-	// --- Shared storage math ---
 
 	var colNames []string
 	for name := range totals.Columns {
@@ -321,10 +289,7 @@ func main() {
 	pgOptimisedGB := float64(pgTotalOverhead+totalDictDataBytes) / gb
 	pgOverheadGB := float64(pgTotalOverhead) / gb
 
-	// --- Output ---
-
 	if *jsonFlag {
-		// Emit JSON manifest consumed by the Python ingest pipeline.
 		m := manifest{
 			ValidFiles:     totals.Files,
 			FailedFiles:    totals.FailedFiles,
@@ -357,7 +322,6 @@ func main() {
 		return
 	}
 
-	// Human-readable report (original behaviour, unchanged)
 	fmt.Println("\n_____COLUMN DENSITY REPORT_____")
 	for _, cr := range colResults {
 		fmt.Printf(

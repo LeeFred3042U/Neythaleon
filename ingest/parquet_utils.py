@@ -33,13 +33,6 @@ def stream_parquet_chunks(folder: str, chunk_size: int, backend: str = "pyarrow"
                 yield batch.to_pandas()
 
 def get_full_schema_from_parquet(folder: str) -> Optional[List[str]]:
-    """
-    Return the union (list) of column names across all parquet files in folder.
-
-    Notes:
-    - Avoids pyarrow Schema merge API differences by collecting names.
-    - dtype inference is handled later from a processed sample.
-    """
     folder = os.fspath(folder)
     names = set()
     for file in os.listdir(folder):
@@ -48,11 +41,9 @@ def get_full_schema_from_parquet(folder: str) -> Optional[List[str]]:
         path = os.path.join(folder, file)
         try:
             pf = pq.ParquetFile(path)
-            # pf.schema_arrow.names is available and consistent
             names.update(pf.schema_arrow.names)
         except Exception:
             logger.exception("Failed to read schema from %s", path)
     if not names:
         return None
-    # return deterministic order (sorted) so table creation is stable
     return sorted(names)

@@ -1,13 +1,3 @@
-"""
-Load and parse the JSON manifest produced by:
-    go run goSchemeReader/main.go --json <folder> > schema_manifest.json
-
-When a manifest is present, _create_table_if_missing() skips sample-chunk
-materialisation and uses the manifest's column/type data directly.
-INT_COLUMNS is also auto-populated from integer-physical-type columns that
-exceed the density threshold, unless INT_COLUMNS was explicitly set via env.
-"""
-
 import json
 import logging
 from pathlib import Path
@@ -17,7 +7,6 @@ import pandas as pd
 
 logger = logging.getLogger(__name__)
 
-# Go physical types → pandas nullable dtypes
 _PHYS_TO_PANDAS: Dict[str, str] = {
     "INT32":                "Int32",
     "INT64":                "Int64",
@@ -26,18 +15,13 @@ _PHYS_TO_PANDAS: Dict[str, str] = {
     "BOOLEAN":              "boolean",
     "BYTE_ARRAY":           "object",
     "FIXED_LEN_BYTE_ARRAY": "object",
-    "INT96":                "object",   # legacy timestamp encoding
+    "INT96":                "object",
 }
 
-# Physical types treated as integers for INT_COLUMNS inference
 _INTEGER_PHYSICAL = {"INT32", "INT64"}
 
 
 def load_manifest(path: str | Path) -> Optional[Dict[str, Any]]:
-    """
-    Return parsed manifest dict or None if the file does not exist / is unreadable.
-    Never raises — callers fall back to sample-chunk inference on None.
-    """
     path = Path(path)
     if not path.exists():
         logger.debug("No manifest at %s; will infer schema from sample chunk", path)
@@ -59,10 +43,6 @@ def load_manifest(path: str | Path) -> Optional[Dict[str, Any]]:
 
 
 def infer_int_columns(manifest: Dict[str, Any], density_threshold: float = 50.0) -> List[str]:
-    """
-    Return columns whose Go physical type is integer-like and whose non-null
-    density exceeds density_threshold (0-100).  Safe candidates for INT_COLUMNS.
-    """
     result = [
         name
         for name, col in manifest.get("columns", {}).items()
@@ -73,11 +53,6 @@ def infer_int_columns(manifest: Dict[str, Any], density_threshold: float = 50.0)
 
 
 def build_schema_df(manifest: Dict[str, Any]) -> pd.DataFrame:
-    """
-    Build an empty DataFrame whose columns and dtypes reflect the manifest.
-    Passed to create_table_from_df() so the DB table is created without
-    streaming a sample chunk.
-    """
     columns: Dict[str, Any] = manifest.get("columns", {})
     schema: Dict[str, str] = {
         name: _PHYS_TO_PANDAS.get(col.get("physical_type", ""), "object")
@@ -93,7 +68,6 @@ def build_schema_df(manifest: Dict[str, Any]) -> pd.DataFrame:
 
 
 def _log_storage_hints(manifest: Dict[str, Any]) -> None:
-    """Log the storage estimates embedded in the manifest (if present)."""
     est = manifest.get("storage_estimate_gb", {})
     if not est:
         return

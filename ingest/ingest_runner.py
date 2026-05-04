@@ -37,24 +37,17 @@ from ingest.transform import process_chunk
 logger = logging.getLogger(__name__)
 
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
 def _batched(iterable, n: int):
-    """Yield successive non-overlapping batches of size n from an iterable."""
     it = iter(iterable)
     while batch := list(itertools.islice(it, n)):
         yield batch
 
 
 def _transform_one(chunk: pd.DataFrame, int_columns: list) -> pd.DataFrame:
-    """Stateless transform — safe for concurrent execution in a thread pool."""
     return process_chunk(chunk, int_columns=int_columns)
 
 
 def _throttle_if_needed(cpu_usage: float, mem_usage: float) -> None:
-    """Sleep (and optionally GC) when system resources are under pressure."""
     if cpu_usage > CPU_THRESHOLD:
         logger.warning(
             "High CPU (%.1f%%). Sleeping %.1fs", cpu_usage, THROTTLE_DELAY_HIGH_CPU
@@ -72,16 +65,7 @@ def _throttle_if_needed(cpu_usage: float, mem_usage: float) -> None:
         time.sleep(THROTTLE_DELAY)
 
 
-# ---------------------------------------------------------------------------
-# Table bootstrap
-# ---------------------------------------------------------------------------
-
 def _effective_int_columns(manifest) -> list:
-    """
-    Merge env-configured INT_COLUMNS with manifest-inferred integer columns.
-    Explicit env config always wins.  If INT_COLUMNS is empty and a manifest
-    is present, auto-populate from INT32/INT64 columns with density >= 50%.
-    """
     if INT_COLUMNS:
         return INT_COLUMNS
     if manifest is not None:
@@ -98,14 +82,6 @@ def _effective_int_columns(manifest) -> list:
 
 
 def _create_table_if_missing(engine, manifest=None) -> list:
-    """
-    Ensure the target table exists and return its ordered column list.
-
-    Schema resolution order:
-      1. Table already in DB   -> return existing columns unchanged.
-      2. Go manifest available -> build schema from manifest (zero sample I/O).
-      3. Fallback              -> stream a small sample chunk and infer dtypes.
-    """
     cols = get_table_columns(engine, DB_TABLE)
     if cols:
         return cols
@@ -140,42 +116,24 @@ def _create_table_if_missing(engine, manifest=None) -> list:
     return get_table_columns(engine, DB_TABLE)
 
 
-# ---------------------------------------------------------------------------
-# Main entry point
-# ---------------------------------------------------------------------------
-
 def ingest_data():
-    """
-    Stream every parquet file in PARQUET_DIR into the target PostgreSQL table.
-
-    Parallelism model
-    -----------------
-    Chunks are read and transformed in parallel batches of size PARALLELISM
-    using a ThreadPoolExecutor (overlaps I/O-bound parquet reads with
-    CPU-bound transforms).  DB inserts remain serial — one connection, in
-    order, no contention.
-    """
     engine = create_engine(DATABASE_URL)
 
-    # Load Go manifest if available (returns None gracefully when absent)
     manifest = load_manifest(MANIFEST_FILE)
 
     eff_int_cols = _effective_int_columns(manifest)
 
     db_cols = _create_table_if_missing(engine, manifest=manifest)
 
-    # Fetch DB schema map once — used by coerce_df_to_schema inside the loop
     schema_map = get_table_schema(engine, DB_TABLE)
 
     total_rows = 0
     metrics_history = []
-    chunk_idx = 0  # monotonic counter across all batches
+    chunk_idx = 0
 
     with ThreadPoolExecutor(max_workers=PARALLELISM) as executor:
         for batch in _batched(stream_parquet_chunks(PARQUET_DIR, CHUNK_SIZE), PARALLELISM):
 
-            # Submit transforms for every chunk in this batch concurrently
-            # Use a list to preserve submission order for ordered inserts
             futures = [
                 executor.submit(_transform_one, chunk, eff_int_cols)
                 for chunk in batch

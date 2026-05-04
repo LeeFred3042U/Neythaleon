@@ -4,10 +4,6 @@ import pandas as pd
 import matplotlib.dates as mdates
 
 def format_time_axis(ax):
-    """
-    Set date locator/formatter and rotate tick labels for readability.
-    Call this after plotting time-series on `ax`.
-    """
     locator = mdates.AutoDateLocator()
     formatter = mdates.AutoDateFormatter(locator)
     ax.xaxis.set_major_locator(locator)
@@ -19,7 +15,6 @@ def _plot_time_series_with_gaps(ax, ts: pd.Series, y: pd.Series, *,
                                marker='o', alpha_raw=0.3, smooth_window=5,
                                zorder_raw=2, zorder_smooth=3, color="#1f77b4"):
     df = pd.DataFrame({'ts': ts, 'y': y})
-    # coerce and drop invalids
     df['ts'] = pd.to_datetime(df['ts'], errors='coerce')
     df['y'] = pd.to_numeric(df['y'], errors='coerce')
     df = df.dropna(subset=['ts', 'y'])
@@ -72,15 +67,12 @@ def plot_throughput(ax, df):
     if df.empty:
         ax.text(0.5,0.5,'No data',ha='center'); return
 
-    # tiny jitter on x to reduce overplotting of identical timestamps (in days)
     x_num = mdates.date2num(df['timestamp'].to_numpy())
     jitter = (np.random.randn(len(x_num)) * 1e-6)
     x_jittered = x_num + jitter
 
-    # Raw scatter (use smaller markers for density)
     ax.scatter(mdates.num2date(x_jittered), df['throughput_rps'], s=22, alpha=0.28, label='raw', zorder=2)
 
-    # Single global smoothed line
     window = 7
     smoothed = df['throughput_rps'].rolling(window=window, min_periods=1).mean()
     ax.plot(df['timestamp'], smoothed, linewidth=2.2, zorder=3, label=f'smoothed({window})', color="#1f77b4")
@@ -96,7 +88,6 @@ def plot_cpu_vs_throughput(ax, df):
         ax.text(0.5,0.5,'No data',ha='center')
         return
 
-    # ensure timestamp column is datetime (for consistent indexing if needed)
     if 'timestamp' in df.columns and not pd.api.types.is_datetime64_any_dtype(df['timestamp']):
         df = df.copy()
         df['timestamp'] = pd.to_datetime(df['timestamp'], errors='coerce')
@@ -120,27 +111,20 @@ def plot_memory(ax, df):
     if 'timestamp' not in df.columns or 'memory_mb' not in df.columns:
         ax.text(0.5,0.5,'No data',ha='center'); return
 
-    # ensure timestamp column is datetime
     if not pd.api.types.is_datetime64_any_dtype(df['timestamp']):
         df = df.copy()
         df['timestamp'] = pd.to_datetime(df['timestamp'], errors='coerce')
 
-    # smaller markers & slightly more opaque
     _plot_time_series_with_gaps(ax, df['timestamp'], df['memory_mb'], marker='o', smooth_window=15, alpha_raw=0.5)
     ax.set_title("Memory (MB)")
     format_time_axis(ax)
 
 
 def plot_batch_time(ax, df):
-    """
-    Draw batch processing time as a time-series bar chart (one bar per timestamp).
-    Uses matplotlib date numbers and a fixed default width (1 second) for clarity on tightly spaced logs.
-    """
     if 'timestamp' not in df.columns or 'duration_sec' not in df.columns:
         ax.text(0.5, 0.5, 'No data', ha='center')
         return
 
-    # ensure timestamp column is datetime
     if not pd.api.types.is_datetime64_any_dtype(df['timestamp']):
         df = df.copy()
         df['timestamp'] = pd.to_datetime(df['timestamp'], errors='coerce')
@@ -150,29 +134,23 @@ def plot_batch_time(ax, df):
         ax.text(0.5, 0.5, 'No data', ha='center')
         return
 
-    # Convert to numpy arrays and numeric types
     x_dt = plot_df['timestamp'].to_numpy()
     y = pd.to_numeric(plot_df['duration_sec'], errors='coerce').to_numpy()
 
-    # Convert datetimes to matplotlib internal float representation
     x = mdates.date2num(x_dt)
 
-    # Default fixed width (seconds) — good for dense logs (~1s spacing).
     width_seconds = 1.0
     width = width_seconds / 86400.0
 
-    # If timestamps are sparse with larger deltas, adapt to median delta (use up to width_seconds)
     if len(x) > 1:
         diffs_days = np.diff(x)
         median_diff_days = float(np.nanmedian(diffs_days)) if len(diffs_days) > 0 else 0.0
         if median_diff_days > 0:
-            # don't let median-derived width exceed a couple seconds (keeps bars readable)
             width = min(width, median_diff_days * 0.9)
 
     ax.bar(x, y, width=width, align='center', alpha=0.9)
     ax.set_title("Batch time (s)")
 
-    # Keep the percentile-based y-limit so spikes don't squash the rest
     try:
         valid_y = y[~np.isnan(y)]
         upper = max(5.0, float(np.nanpercentile(valid_y, 98) * 1.2)) if valid_y.size else 5.0
@@ -180,5 +158,4 @@ def plot_batch_time(ax, df):
     except Exception:
         pass
 
-    # Restore date formatting & rotation for x axis
     format_time_axis(ax)

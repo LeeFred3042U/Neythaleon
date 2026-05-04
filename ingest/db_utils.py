@@ -24,9 +24,6 @@ def get_table_columns(engine, table_name: str) -> List[str]:
 
 
 def create_table_from_df(engine, table_name: str, df: pd.DataFrame):
-    """Create an empty table using df.head(0).to_sql(...)
-    Caller should ensure df has final dtypes.
-    """
     logger.info(
         "Creating table '%s' with %d columns", 
         table_name, 
@@ -37,9 +34,6 @@ def create_table_from_df(engine, table_name: str, df: pd.DataFrame):
 
 
 def copy_insert(engine, df: pd.DataFrame, table_name: str):
-    """Fast COPY-based insert. Falls back to to_sql if COPY not possible.
-    Requires Postgres-like DB.
-    """
     if df.empty:
         logger.debug("No rows to insert into %s", table_name)
         return
@@ -58,13 +52,12 @@ def copy_insert(engine, df: pd.DataFrame, table_name: str):
                     quoting=csv.QUOTE_MINIMAL, 
                     escapechar='\\', 
                     na_rep='',
-                    encoding='utf-8' # Explicit encoding
+                    encoding='utf-8'
                 )
                 output.seek(0)
                 
                 quoted_columns = ",".join(f'"{c}"' for c in df.columns)
                 
-                # Ensure the COPY command expects UTF-8 (usually default, but good to be sure)
                 sql = f"COPY {table_name} ({quoted_columns}) FROM STDIN WITH (FORMAT CSV, DELIMITER E'\\t', QUOTE '\"', NULL '', ENCODING 'UTF8')"
                 cur.copy_expert(sql, output)
                 
@@ -91,7 +84,6 @@ def save_failed_chunk(df: pd.DataFrame, chunk_id: int):
 
 
 def get_table_schema(engine, table_name: str) -> dict:
-    """Return a mapping column_name -> textual SQL type (lowercased)."""
     inspector = inspect(engine)
     if table_name not in inspector.get_table_names():
         return {}
