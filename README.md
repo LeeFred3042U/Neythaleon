@@ -8,8 +8,8 @@
 
 ## Features
 
-- **Pre-Ingestion Audit:** Classifies every column by density, infers PostgreSQL types, flags geometry and integer candidates, recommends DROP / EAV / index strategy — all before touching a database. Outputs a self-contained HTML report.
-- **Go Schema Profiler:** Scans an entire Parquet dataset in seconds by reading only file footers — no row materialisation. Produces a JSON manifest that drives both the audit and the ingest pipeline.
+- **Pre-Ingestion Audit:** Built into the `main.py` wizard. Classifies columns, flags candidates for indexing or exclusion, and provides cost estimates before any data is loaded.
+- **Go Schema Profiler:** Scans an entire Parquet dataset in seconds by reading only file footers. Produces the `schema_manifest.json` that drives the entire pipeline.
 - **Manifest-Driven Ingestion:** When a manifest is present, table creation requires zero sample I/O. `INT_COLUMNS` is auto-populated from integer-physical-type columns above a density threshold.
 - **Parallel Transform:** Chunks are transformed concurrently via `ThreadPoolExecutor` (controlled by `PARALLELISM`), overlapping I/O-bound reads with CPU-bound cleaning.
 - **High-Performance Loading:** Uses PostgreSQL's native `COPY` protocol for bulk insertion, with a `to_sql` fallback on failure.
@@ -22,44 +22,15 @@
 
 ## Architecture
 
-```
-goSchemeReader/main.go                      (run once, before anything else)
-  WalkDir → jobs chan → N workers → aggregator goroutine
-  Reads Parquet footers only — never materialises rows
-  --json  →  schema_manifest.json
-  (no flag) →  human-readable column density + storage estimate report
+The pipeline is orchestrated as a sequential CLI wizard in `main.py`. It uses a checkpoint system to persist state, allowing you to resume interrupted runs.
 
-main.py
-  ├── Phase 0: Audit            (always runs; no DB required)
-  │     load_manifest()         ← schema_manifest.json (Go output or existing)
-  │     advisor.analyse()
-  │       classify columns by density (primary / moderate / sparse / dead)
-  │       infer INT_COLUMNS, geometry, FK candidates, index suggestions
-  │       generate CREATE TABLE DDL + EAV recommendation
-  │     report.write_report()   →  media/audit_report.html
-  │     --audit-only: stop here
-  │
-  ├── Phase 1: Ingest
-  │     load_manifest()         ← reuses same manifest
-  │     _create_table_if_missing()
-  │       ├── manifest path: build_schema_df()    (no sample I/O)
-  │       └── fallback path:  stream sample chunk, infer dtypes
-  │     ThreadPoolExecutor(PARALLELISM workers)
-  │       for batch in stream_parquet_chunks():
-  │         futures = [submit(process_chunk) for chunk in batch]
-  │         for future in futures:
-  │           df = future.result()
-  │           df.reindex(db_cols)
-  │           coerce_df_to_schema(df, schema_map)
-  │           copy_insert()  →  PostgreSQL (COPY) or to_sql fallback
-  │           track_metrics() → persist_metrics() → media/*.csv
-  │           throttle_if_needed()
-  │           on error: save_failed_chunk() → failed_chunks/
-  │
-  └── Phase 2: Dashboard
-        read_metrics_fuzzy(media/)
-        create_single_png()    →  media/dashboard_yellow.png
-```
+- **Phase 0:** Manifest check (requires `schema_manifest.json`)
+- **Phase 1:** Interactive column selection
+- **Phase 2:** Bit-array metadata intake
+- **Phase 3:** Cost estimation
+- **Phase 4:** User confirmation
+- **Phase 5:** Data ingestion (via PostgreSQL COPY)
+- **Phase 6:** Dashboard & Graph generation
 
 ### Transform pipeline (per chunk, in fixed order)
 
@@ -79,43 +50,75 @@ main.py
 
 ---
 
-## Quickstart
+## Developer Setup & Running
 
-### Audit only (no database needed)
+Follow these steps to set up and run the Neythaleon project locally.
+
+### 1. Environment Setup
+
+Clone the repository and set up your Python virtual environment:
 
 ```bash
-# Profile the dataset and open the HTML report
-python -m audit ./parquet_files --html media/audit_report.html
+git clone <repository-url>
+cd Neythaleon
+python -m venv venv
 
-# Save the manifest for reuse in subsequent runs
-python -m audit ./parquet_files --html media/audit_report.html \
-    --save-manifest schema_manifest.json
-
-# Print recommended CREATE TABLE DDL only
-python -m audit ./parquet_files --ddl
-
-# Use an existing manifest (skip the Go scan)
-python -m audit ./parquet_files --manifest schema_manifest.json \
-    --html media/audit_report.html --table my_table
+# On Windows:
+venv\Scripts\activate
+# On macOS/Linux:
+source venv/bin/activate
 ```
 
-### Full pipeline (audit → ingest → dashboard)
+Install the required Python dependencies:
 
 ```bash
-# Step 1 — run the Go profiler once (reads metadata only)
+pip install -r requirements.txt
+```
+
+### 2. Configuration & Data Preparation
+
+Copy the environment template and configure it with your local settings (e.g., your PostgreSQL `DATABASE_URL`):
+
+```bash
+cp .env.example .env
+```
+
+Next, place the `.parquet` files you want to ingest into the `parquet_files/` directory (or update the `PARQUET_DIR` variable in `.env`).
+
+### 3. Running the Project
+
+Neythaleon provides an interactive, resumable 6-phase CLI wizard for the full ingestion pipeline, as well as a standalone module for pre-ingestion auditing.
+
+#### Full Interactive Pipeline (Audit → Ingest → Dashboard)
+
+The main pipeline uses checkpoints. If interrupted, re-running the script will prompt you to resume from where you left off.
+
+```bash
+# Step 1 — Run the Go profiler once to generate the schema manifest
 go run goSchemeReader/main.go --json ./parquet_files > schema_manifest.json
 
-# Step 2 — copy and edit config
-cp .env.example .env
-
-# Step 3 — run everything
+# Step 2 — Start the interactive orchestrator wizard
 python main.py
+```
 
-# Audit only, then stop before any DB writes
-python main.py --audit-only
+#### Integrated Pipeline (Audit → Ingest → Dashboard)
 
-# Skip audit, go straight to ingest
-python main.py --skip-audit
+The main pipeline is interactive. Simply follow the prompts to select columns and review cost estimates before confirming the ingestion.
+
+```bash
+# Step 1 — Run the Go profiler once to generate the schema manifest
+go run goSchemeReader/main.go --json ./parquet_files > schema_manifest.json
+
+# Step 2 — Start the interactive orchestrator wizard
+python main.py
+```
+
+#### Quick Inspection Tool (No Database)
+
+If you just want a quick JSON summary of column densities and storage estimates without running the full wizard:
+
+```bash
+python inspect_parquet.py ./parquet_files --json
 ```
 
 Leave `INT_COLUMNS` empty in `.env` to let the manifest auto-populate it. Set explicitly to override.
@@ -151,46 +154,27 @@ Neythaleon/
 ├── requirements.txt
 ├── schema_manifest.json            # produced by: go run goSchemeReader/main.go --json <dir>
 │
-├── audit/                          # pre-ingestion audit package
-│   ├── __init__.py
-│   ├── __main__.py                 # enables: python -m audit <folder>
-│   ├── advisor.py                  # column classification + DDL generation engine
-│   ├── report.py                   # self-contained HTML report renderer
-│   └── cli.py                      # CLI: --html, --ddl, --manifest, --table, --columns
+├── checkpoint/                    # checkpoint system
+│   └── checkpoint.py              # persists phase state to checkpoint.json
 │
-├── goSchemeReader/
-│   ├── main.go                     # Go CLI: schema profiler + storage estimator
-│   ├── README.md                   # goSchemeReader-specific docs
-│   └── outputLog.md                # sample output from a full dataset run
+├── bitarray/                      # bit-array handling
+│   ├── detector.py                # identifies bit-encoded columns
+│   ├── decoder.py                 # unpacks bytes to columns
+│   └── metadata_loader.py         # validates encoding JSON
 │
-├── ingest/
-│   ├── cli.py                      # argparse entry point (--debug flag)
-│   ├── config.py                   # env loading; all typed config values
-│   ├── logging_config.py           # dual-sink logging (stdout + file)
-│   ├── ingest_runner.py            # orchestration loop (stream → transform → insert)
-│   ├── manifest.py                 # loads Go manifest; drives schema and INT_COLUMNS
-│   ├── db_utils.py                 # table inspect, COPY insert, failed-chunk save
-│   ├── parquet_utils.py            # chunk streaming (PyArrow) + schema union
-│   ├── transform.py                # process_chunk: null bytes, chars, ints, geometry
-│   ├── scheme_utils.py             # coerce_df_to_schema: DB-type-aware coercion
-│   └── metrics.py                  # track_metrics + persist_metrics (append-only CSV)
+├── cost/                          # cost estimation logic
+│   └── calculator.py
 │
-├── plot/
-│   ├── cli.py                      # reads media/*.csv, calls dashboard
-│   ├── dashboard.py                # create_single_png (2×2 layout)
-│   ├── metrics_loader.py           # fuzzy CSV reader with numeric coercion
-│   └── plotting_panels.py          # 4 panels: throughput, CPU scatter, memory, batch time
+├── selector/                      # column selection system
+│   ├── column_selector.py         # Rich TUI selector
+│   └── recommender.py             # heuristic recommendations
 │
-├── parquet_files/                  # place your .parquet files here (PARQUET_DIR default)
-│   └── *.parquet
+├── plot/                          # graphing & dashboards
+│   ├── dashboard.py               # performance metrics dashboard
+│   └── user_graphs.py             # data-driven graph wizard
 │
-├── media/                          # all outputs land here
-│   ├── audit_report.html           # pre-ingestion schema audit (open in browser)
-│   ├── ingestion_metrics.csv       # append-only per-chunk metrics log
-│   └── dashboard_yellow.png        # post-ingestion performance dashboard
-│
-└── failed_chunks/                  # CSVs written when a chunk fails; run continues
-    └── failed_chunk_<n>.csv
+├── goSchemeReader/                # Go-based fast schema profiler
+│   └── main.go
 ```
 
 ---

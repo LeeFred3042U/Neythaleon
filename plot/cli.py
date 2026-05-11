@@ -1,10 +1,12 @@
 from pathlib import Path
-import pandas as pd  # FIX: was missing; caused NameError on pd.to_datetime()
+import pandas as pd
 from .metrics_loader import read_metrics_fuzzy
 from .dashboard import create_single_png
+from ingest.config import MEDIA_DIR
 
 
-def main(metrics_dir: str = 'media', output: str = 'media/dashboard_yellow.png'):
+def main(metrics_dir: str | Path = MEDIA_DIR,
+         output: str | Path = MEDIA_DIR / 'dashboard_yellow.png'):
     df = read_metrics_fuzzy(metrics_dir)
     if 'timestamp' in df.columns:
         try:

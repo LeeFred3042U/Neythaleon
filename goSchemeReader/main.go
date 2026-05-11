@@ -20,6 +20,9 @@ type ColStat struct {
 	LogicalType  string
 	TotalValues  int64
 	TotalNulls   int64
+	TypeLength   int32
+	Compression  string
+	Encoding     string
 }
 
 type FileResult struct {
@@ -45,6 +48,9 @@ type colManifest struct {
 	TotalValues  int64   `json:"total_values"`
 	TotalNulls   int64   `json:"total_nulls"`
 	DensityPct   float64 `json:"density_pct"`
+	TypeLength   int32   `json:"type_length,omitempty"`
+	Compression  string  `json:"compression,omitempty"`
+	Encoding     string  `json:"encoding,omitempty"`
 }
 
 type storageEstimateGB struct {
@@ -113,6 +119,14 @@ func inspect(path string) FileResult {
 		}
 
 		var vals, nulls int64
+		var typeLength int32
+		var compression, encoding string
+
+		// Capture TypeLength for FIXED_LEN_BYTE_ARRAY
+		if phys == "FIXED_LEN_BYTE_ARRAY" {
+			typeLength = int32(col.TypeLength())
+		}
+
 		for rg := 0; rg < len(meta.RowGroups); rg++ {
 			rgMeta := meta.RowGroup(rg)
 			colChunk, err := rgMeta.ColumnChunk(i)
@@ -124,6 +138,15 @@ func inspect(path string) FileResult {
 			if err == nil && stats != nil && stats.HasNullCount() {
 				nulls += stats.NullCount()
 			}
+
+			// Capture compression and encoding from first row group only
+			if rg == 0 {
+				compression = colChunk.Compression().String()
+				encs := colChunk.Encodings()
+				if len(encs) > 0 {
+					encoding = encs[0].String()
+				}
+			}
 		}
 
 		res.ColStats[name] = &ColStat{
@@ -131,6 +154,9 @@ func inspect(path string) FileResult {
 			LogicalType:  logical,
 			TotalValues:  vals,
 			TotalNulls:   nulls,
+			TypeLength:   typeLength,
+			Compression:  compression,
+			Encoding:     encoding,
 		}
 	}
 
@@ -187,6 +213,9 @@ func main() {
 					totals.Columns[name] = &ColStat{
 						PhysicalType: stat.PhysicalType,
 						LogicalType:  stat.LogicalType,
+						TypeLength:   stat.TypeLength,
+						Compression:  stat.Compression,
+						Encoding:     stat.Encoding,
 					}
 				}
 				totals.Columns[name].TotalValues += stat.TotalValues
@@ -262,6 +291,13 @@ func main() {
 		case "BYTE_ARRAY":
 			rawBytes = nonNulls * 15
 			dictBytes = nonNulls * 4
+		case "FIXED_LEN_BYTE_ARRAY":
+			typeLen := int64(8)
+			if stat.TypeLength > 0 {
+				typeLen = int64(stat.TypeLength)
+			}
+			rawBytes = nonNulls * typeLen
+			dictBytes = rawBytes
 		default:
 			rawBytes = nonNulls * 8
 			dictBytes = rawBytes
@@ -311,6 +347,9 @@ func main() {
 				TotalValues:  cr.stat.TotalValues,
 				TotalNulls:   cr.stat.TotalNulls,
 				DensityPct:   cr.density,
+				TypeLength:   cr.stat.TypeLength,
+				Compression:  cr.stat.Compression,
+				Encoding:     cr.stat.Encoding,
 			}
 		}
 		enc := json.NewEncoder(os.Stdout)

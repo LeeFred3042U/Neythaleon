@@ -64,9 +64,13 @@ def convert_geometry_to_wkt(df: pd.DataFrame, geom_col: str = 'geometry') -> pd.
     return df
 
 
-def process_chunk(df, int_columns: List[str] = None):
+def process_chunk(df, int_columns: List[str] = None, bit_array_metadata=None):
     df = clean_null_bytes(df)
     df = clean_special_characters(df)
     df = enforce_integer_types(df, int_columns=int_columns)
     df = convert_geometry_to_wkt(df)
+    if bit_array_metadata is not None:
+        from bitarray.decoder import decode_bit_array_columns
+        bit_cols = [c for c in df.columns if c in bit_array_metadata.columns]
+        df = decode_bit_array_columns(df, bit_cols, bit_array_metadata)
     return df

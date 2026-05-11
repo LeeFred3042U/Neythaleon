@@ -25,17 +25,15 @@ def coerce_df_to_schema(df: pd.DataFrame, schema_map: dict) -> pd.DataFrame:
 
         # INTEGER family
         if any(k in sql for k in ("int", "bigint", "smallint")):
-            s = pd.to_numeric(series, errors="coerce")  # floats or numeric strings -> float or NaN
-            # mark non-integral floats as NaN (so we won't break COPY)
-            non_integral = s.notna() & (s % 1 != 0)
-            if non_integral.any():
+            s = pd.to_numeric(series, errors="coerce")
+            non_integral_mask = s.notna() & (s % 1 != 0)
+            if non_integral_mask.any():
                 logger.debug(
                     "Column %s: %d non-integral values will become NA for integer target", 
                     col, 
-                    int(non_integral.sum())
+                    int(non_integral_mask.sum())
                     )
-            s[non_integral] = pd.NA
-            # cast to pandas nullable Int64
+            s = s.where(~non_integral_mask, other=pd.NA)
             try:
                 df[col] = s.astype("Int64")
             except Exception:
@@ -54,9 +52,29 @@ def coerce_df_to_schema(df: pd.DataFrame, schema_map: dict) -> pd.DataFrame:
 
         # BOOLEAN
         if "bool" in sql:
-            # map common truthy/falsy strings; leave others as NA
-            df[col] = series.map({True: True, False: False, "true": True, "false": False, "1": True, "0": False}).astype("boolean")
+            df[col] = pd.array([_to_nullable_bool(v) for v in series], dtype="boolean")
             continue
 
         # otherwise: leave column as-is (string/text)
     return df
+
+
+def _to_nullable_bool(val):
+    """Convert a value to a nullable boolean, handling common truthy/falsy representations."""
+    if pd.isna(val):
+        return pd.NA
+    if isinstance(val, (bool, np.bool_)):
+        return bool(val)
+    if isinstance(val, (int, float)):
+        if val == 1:
+            return True
+        if val == 0:
+            return False
+        return pd.NA
+    if isinstance(val, str):
+        lower = val.strip().lower()
+        if lower in ("true", "t", "yes", "1"):
+            return True
+        if lower in ("false", "f", "no", "0"):
+            return False
+    return pd.NA
