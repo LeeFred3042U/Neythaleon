@@ -3,6 +3,7 @@
 *.log
 *.html
 *.parquet
+*.json
 
 # Ignoring specific raw/input/data/inspect files
 occurrence.txt
@@ -18,8 +19,9 @@ __pycache__/
 venv/
 .env
 .venv
-parquet_files/
-
+parquet_files/**
+checkpoint/**
+failed_chunks/**
 # Temporary scripts
 plot_coords_map.py
 
@@ -63,6 +65,9 @@ go.work.sum
 
 # env file
 .env
+
+# Runtime checkpoint state
+checkpoint.json
 
 # Editor/IDE
 # .idea/
