@@ -1,13 +1,20 @@
 import time
+
 import csv
+
 import logging
-import os
+
+
 from datetime import datetime
+
 import psutil
-from ingest.config import METRICS_FILE, MEDIA_DIR
+
+from ingest.config import METRICS_FILE
 
 logger = logging.getLogger(__name__)
 
+_process = psutil.Process()
+_process.cpu_percent()  # Initialize the baseline for CPU tracking
 
 CANONICAL_FIELDNAMES = [
     "timestamp",
@@ -21,24 +28,41 @@ CANONICAL_FIELDNAMES = [
     "memory_mb",
 ]
 
+
 def persist_metrics(metrics: dict):
+
     metrics = _normalize_metric_dict(metrics)
+
     METRICS_FILE.parent.mkdir(parents=True, exist_ok=True)
+
     file_exists = METRICS_FILE.exists()
+
     with open(METRICS_FILE, "a", newline="") as fh:
         writer = csv.DictWriter(fh, fieldnames=CANONICAL_FIELDNAMES)
+
         if not file_exists:
             writer.writeheader()
-        # ensure stable ordering and fill missing keys
+
         row = {k: metrics.get(k, "") for k in CANONICAL_FIELDNAMES}
+
         writer.writerow(row)
+
     logger.debug("Persisted metrics: %s", metrics)
 
 
-def track_metrics(start_time: float, row_count: int, error_count: int = 0, duplicates: int = 0, nulls: float = 0) -> dict:
+def track_metrics(
+    start_time: float,
+    row_count: int,
+    error_count: int = 0,
+    duplicates: int = 0,
+    nulls: float = 0,
+) -> dict:
+
     duration = time.time() - start_time
-    cpu = psutil.cpu_percent(interval=None)
-    memory = psutil.virtual_memory().used / (1024 * 1024)
+
+    cpu = _process.cpu_percent(interval=None) / psutil.cpu_count()
+
+    memory = _process.memory_info().rss / (1024 * 1024)
 
     return {
         "timestamp": datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"),
@@ -54,9 +78,9 @@ def track_metrics(start_time: float, row_count: int, error_count: int = 0, dupli
 
 
 def _normalize_metric_dict(metrics: dict) -> dict:
-    # rename any known alternatives to canonical names
+
     m = metrics.copy()
-    # example aliases
+
     aliases = {
         "rows_per_second": "throughput_rps",
         "rows_per_sec": "throughput_rps",
@@ -65,11 +89,9 @@ def _normalize_metric_dict(metrics: dict) -> dict:
         "duration": "duration_sec",
         "cpu_usage": "cpu_percent",
     }
+
     for k, v in list(m.items()):
         if k in aliases:
             m[aliases[k]] = m.pop(k)
-    # ensure timestamp present and formatted
-    if "timestamp" in m:
-        # keep as string; plotter will parse
-        pass
+
     return m

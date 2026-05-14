@@ -13,6 +13,7 @@ create_table.py
 ingestion.log
 metrics_log.csv
 map.html
+codebase_analysis.md
 
 # Environment + build
 __pycache__/

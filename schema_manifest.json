@@ -1,20 +1,20 @@
 {
-  "valid_files": 24,
+  "valid_files": 64,
   "failed_files": 0,
-  "total_rows": 15264236,
-  "total_size_bytes": 215471008,
-  "elapsed_sec": 0.0112401,
+  "total_rows": 43329607,
+  "total_size_bytes": 633355303,
+  "elapsed_sec": 0.020846,
   "storage_estimate_gb": {
-    "parquet_gb": 0.20067301392555237,
-    "pg_overhead_gb": 0.3696141168475151,
-    "pg_unoptimised_gb": 2.6303543774411082,
-    "pg_optimised_gb": 1.2719351686537266
+    "parquet_gb": 0.5898580914363265,
+    "pg_overhead_gb": 1.0491998698562384,
+    "pg_unoptimised_gb": 7.557660356163979,
+    "pg_optimised_gb": 3.6411525681614876
   },
   "columns": {
     "AphiaID": {
       "physical_type": "INT32",
       "logical_type": "None",
-      "total_values": 15264236,
+      "total_values": 43329607,
       "total_nulls": 0,
       "density_pct": 100,
       "compression": "SNAPPY",
@@ -23,16 +23,16 @@
     "category": {
       "physical_type": "BYTE_ARRAY",
       "logical_type": "String",
-      "total_values": 15264236,
-      "total_nulls": 14686037,
-      "density_pct": 3.787932786154512,
+      "total_values": 43329607,
+      "total_nulls": 40933379,
+      "density_pct": 5.530232480529999,
       "compression": "SNAPPY",
       "encoding": "PLAIN"
     },
     "cell": {
       "physical_type": "BYTE_ARRAY",
       "logical_type": "String",
-      "total_values": 15264236,
+      "total_values": 43329607,
       "total_nulls": 0,
       "density_pct": 100,
       "compression": "SNAPPY",
@@ -41,34 +41,34 @@
     "class": {
       "physical_type": "BYTE_ARRAY",
       "logical_type": "String",
-      "total_values": 15264236,
-      "total_nulls": 974549,
-      "density_pct": 93.61547476074138,
+      "total_values": 43329607,
+      "total_nulls": 1883392,
+      "density_pct": 95.65333698964776,
       "compression": "SNAPPY",
       "encoding": "PLAIN"
     },
     "family": {
       "physical_type": "BYTE_ARRAY",
       "logical_type": "String",
-      "total_values": 15264236,
-      "total_nulls": 880701,
-      "density_pct": 94.23029753994894,
+      "total_values": 43329607,
+      "total_nulls": 1601319,
+      "density_pct": 96.30433066240366,
       "compression": "SNAPPY",
       "encoding": "PLAIN"
     },
     "genus": {
       "physical_type": "BYTE_ARRAY",
       "logical_type": "String",
-      "total_values": 15264236,
-      "total_nulls": 688474,
-      "density_pct": 95.4896268637356,
+      "total_values": 43329607,
+      "total_nulls": 1306450,
+      "density_pct": 96.98485610543386,
       "compression": "SNAPPY",
       "encoding": "PLAIN"
     },
     "geometry": {
       "physical_type": "BYTE_ARRAY",
       "logical_type": "None",
-      "total_values": 15264236,
+      "total_values": 43329607,
       "total_nulls": 0,
       "density_pct": 100,
       "compression": "SNAPPY",
@@ -77,52 +77,52 @@
     "kingdom": {
       "physical_type": "BYTE_ARRAY",
       "logical_type": "String",
-      "total_values": 15264236,
-      "total_nulls": 861877,
-      "density_pct": 94.35361848441023,
+      "total_values": 43329607,
+      "total_nulls": 1571872,
+      "density_pct": 96.372291121865,
       "compression": "SNAPPY",
       "encoding": "PLAIN"
     },
     "max_year": {
       "physical_type": "INT64",
       "logical_type": "None",
-      "total_values": 15264236,
-      "total_nulls": 1216509,
-      "density_pct": 92.03033155409808,
+      "total_values": 43329607,
+      "total_nulls": 2875426,
+      "density_pct": 93.36383087896458,
       "compression": "SNAPPY",
       "encoding": "PLAIN"
     },
     "min_year": {
       "physical_type": "INT64",
       "logical_type": "None",
-      "total_values": 15264236,
-      "total_nulls": 1216509,
-      "density_pct": 92.03033155409808,
+      "total_values": 43329607,
+      "total_nulls": 2875426,
+      "density_pct": 93.36383087896458,
       "compression": "SNAPPY",
       "encoding": "PLAIN"
     },
     "order": {
       "physical_type": "BYTE_ARRAY",
       "logical_type": "String",
-      "total_values": 15264236,
-      "total_nulls": 1089212,
-      "density_pct": 92.86428747563913,
+      "total_values": 43329607,
+      "total_nulls": 2124770,
+      "density_pct": 95.0962629317178,
       "compression": "SNAPPY",
       "encoding": "PLAIN"
     },
     "phylum": {
       "physical_type": "BYTE_ARRAY",
       "logical_type": "String",
-      "total_values": 15264236,
-      "total_nulls": 862248,
-      "density_pct": 94.35118796643344,
+      "total_values": 43329607,
+      "total_nulls": 1573004,
+      "density_pct": 96.36967858951502,
       "compression": "SNAPPY",
       "encoding": "PLAIN"
     },
     "records": {
       "physical_type": "INT64",
       "logical_type": "None",
-      "total_values": 15264236,
+      "total_values": 43329607,
       "total_nulls": 0,
       "density_pct": 100,
       "compression": "SNAPPY",
@@ -131,7 +131,7 @@
     "source_gbif": {
       "physical_type": "BOOLEAN",
       "logical_type": "None",
-      "total_values": 15264236,
+      "total_values": 43329607,
       "total_nulls": 0,
       "density_pct": 100,
       "compression": "SNAPPY",
@@ -140,7 +140,7 @@
     "source_obis": {
       "physical_type": "BOOLEAN",
       "logical_type": "None",
-      "total_values": 15264236,
+      "total_values": 43329607,
       "total_nulls": 0,
       "density_pct": 100,
       "compression": "SNAPPY",
@@ -149,9 +149,9 @@
     "species": {
       "physical_type": "BYTE_ARRAY",
       "logical_type": "String",
-      "total_values": 15264236,
-      "total_nulls": 33,
-      "density_pct": 99.99978380837403,
+      "total_values": 43329607,
+      "total_nulls": 228,
+      "density_pct": 99.99947380090477,
       "compression": "SNAPPY",
       "encoding": "PLAIN"
     }

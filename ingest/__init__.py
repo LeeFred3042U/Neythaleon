@@ -1,25 +1,23 @@
 from .ingest_runner import ingest_data
+
 from .config import (
-PARQUET_DIR,
-FAILED_DIR,
-DB_TABLE,
-CHUNK_SIZE,
-METRICS_FILE,
-PARALLELISM,
-INT_COLUMNS,
-CPU_THRESHOLD,
-THROTTLE_DELAY_HIGH_CPU,
-THROTTLE_DELAY,
+    PARQUET_DIR,
+    FAILED_DIR,
+    DB_TABLE,
+    CHUNK_SIZE,
+    METRICS_FILE,
+    INT_COLUMNS,
+    CPU_THRESHOLD,
+    THROTTLE_DELAY_HIGH_CPU,
+    THROTTLE_DELAY,
 )
 
-
 __all__ = [
-"ingest_data",
-"PARQUET_DIR",
-"FAILED_DIR",
-"DB_TABLE",
-"CHUNK_SIZE",
-"METRICS_FILE",
-"PARALLELISM",
-"INT_COLUMNS",
+    "ingest_data",
+    "PARQUET_DIR",
+    "FAILED_DIR",
+    "DB_TABLE",
+    "CHUNK_SIZE",
+    "METRICS_FILE",
+    "INT_COLUMNS",
 ]

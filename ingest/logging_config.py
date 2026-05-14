@@ -1,16 +1,23 @@
 import logging
+
 import sys
+
 from ingest.config import LOG_FILE
 
 
 def configure_logging(debug: bool = False):
+
     level = logging.DEBUG if debug else logging.INFO
+
+    try:
+        LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        pass
 
     handlers = [
         logging.StreamHandler(sys.stdout),
         logging.FileHandler(str(LOG_FILE)),
     ]
-
 
     logging.basicConfig(
         level=level,
@@ -19,4 +26,5 @@ def configure_logging(debug: bool = False):
     )
 
     logging.getLogger("sqlalchemy.engine").setLevel(logging.WARNING)
+
     logging.debug("Logging configured (debug=%s), file=%s", debug, LOG_FILE)

@@ -1,232 +1,267 @@
 # Neythaleon
 
-**Neythaleon** is a pre-ingestion audit and data pipeline toolkit for large scientific Parquet datasets. It profiles a dataset before any rows are loaded, produces a schema recommendation report, streams data into PostgreSQL in memory-bounded chunks, and generates a performance dashboard automatically on completion.
-
-> _"The Eye Below Logs Everything."_
+Parquet-to-PostgreSQL ingestion pipeline for large-scale species occurrence datasets.
 
 ---
 
-## Features
+## What it does
 
-- **Pre-Ingestion Audit:** Built into the `main.py` wizard. Classifies columns, flags candidates for indexing or exclusion, and provides cost estimates before any data is loaded.
-- **Go Schema Profiler:** Scans an entire Parquet dataset in seconds by reading only file footers. Produces the `schema_manifest.json` that drives the entire pipeline.
-- **Manifest-Driven Ingestion:** When a manifest is present, table creation requires zero sample I/O. `INT_COLUMNS` is auto-populated from integer-physical-type columns above a density threshold.
-- **Parallel Transform:** Chunks are transformed concurrently via `ThreadPoolExecutor` (controlled by `PARALLELISM`), overlapping I/O-bound reads with CPU-bound cleaning.
-- **High-Performance Loading:** Uses PostgreSQL's native `COPY` protocol for bulk insertion, with a `to_sql` fallback on failure.
-- **Robust ETL:** Handles null bytes, special characters, WKB geometry, integer coercion, and nullable types in a fixed pipeline per chunk.
-- **Adaptive Throttling:** Polls CPU and RAM after every chunk. Sleeps and optionally GCs when thresholds are exceeded.
-- **Fault Isolation:** Failed chunks are written to `failed_chunks/` as CSV files. The run always continues.
-- **Automatic Observability:** Every chunk appends a row to `media/ingestion_metrics.csv`. A four-panel PNG dashboard is generated immediately after ingestion completes.
+Neythaleon reads partitioned Parquet files (OBIS H3-gridded species grids), lets you select which columns to ingest, resolves bit-array encoded columns, estimates storage cost before committing, then bulk-loads the data into a PostgreSQL table using `COPY`. Each pipeline phase is checkpointed so interrupted runs can be resumed from where they left off. After ingestion, a performance dashboard is generated from collected metrics.
+
+**Typical use case:** ingesting the OBIS `speciesgrids/h3_7` dataset (~2M+ rows across dozens of Parquet files) into a self-hosted or Neon-hosted PostgreSQL instance for downstream querying and analysis.
 
 ---
 
-## Architecture
+## Tech stack
 
-The pipeline is orchestrated as a sequential CLI wizard in `main.py`. It uses a checkpoint system to persist state, allowing you to resume interrupted runs.
+| Layer | Technology |
+|---|---|
+| Language (pipeline) | Python 3.11+ |
+| Language (schema scan) | Go 1.21+ |
+| Database | PostgreSQL (psycopg2 via SQLAlchemy) |
+| Data format | Parquet (PyArrow / DuckDB) |
+| Parallelism | `ProcessPoolExecutor` (transform) + `ThreadPoolExecutor` (write) |
+| CLI / TUI | Rich, Questionary |
+| Plotting | Matplotlib |
+| Linter | Ruff |
+| Tests | pytest |
 
-- **Phase 0:** Manifest check (requires `schema_manifest.json`)
-- **Phase 1:** Interactive column selection
-- **Phase 2:** Bit-array metadata intake
-- **Phase 3:** Cost estimation
-- **Phase 4:** User confirmation
-- **Phase 5:** Data ingestion (via PostgreSQL COPY)
-- **Phase 6:** Dashboard & Graph generation
+**Python dependencies** (see `requirements.txt`):
 
-### Transform pipeline (per chunk, in fixed order)
-
-1. Strip null bytes (`\x00`) from string columns — vectorised
-2. Sanitise special characters (`\n`, `\r`, `\t` → space) — regex
-3. Coerce integer columns to nullable `Int64` — from `INT_COLUMNS` or manifest inference
-4. Decode WKB binary geometry → WKT text via Shapely
-
-### Audit column categories
-
-| Category | Density | Default action                     |
-| -------- | ------- | ---------------------------------- |
-| Primary  | ≥ 80%   | Keep; index if integer or boolean  |
-| Moderate | 20–79%  | Keep as nullable                   |
-| Sparse   | 1–19%   | Warn; candidate for EAV side table |
-| Dead     | 0%      | Recommend DROP                     |
+```
+python-dotenv, psutil, pandas, duckdb, sqlalchemy, psycopg2-binary,
+shapely, numpy, matplotlib, pyarrow, tqdm, rich, questionary, pytest
+```
 
 ---
 
-## Developer Setup & Running
-
-Follow these steps to set up and run the Neythaleon project locally.
-
-### 1. Environment Setup
-
-Clone the repository and set up your Python virtual environment:
+## Installation
 
 ```bash
-git clone <repository-url>
+git clone https://github.com/LeeFred3042U/Neythaleon.git
 cd Neythaleon
+
 python -m venv venv
-
-# On Windows:
+# Windows
 venv\Scripts\activate
-# On macOS/Linux:
+# Linux / macOS
 source venv/bin/activate
-```
+# Git Bash
+source venv/Scripts/activate
 
-Install the required Python dependencies:
-
-```bash
 pip install -r requirements.txt
 ```
 
-### 2. Configuration & Data Preparation
-
-Copy the environment template and configure it with your local settings (e.g., your PostgreSQL `DATABASE_URL`):
+**Go tool** (schema manifest generator — only needed to regenerate `schema_manifest.json`):
 
 ```bash
-cp .env.example .env
+go build -o goSchemeReader ./main.go
 ```
 
-Next, place the `.parquet` files you want to ingest into the `parquet_files/` directory (or update the `PARQUET_DIR` variable in `.env`).
-
-### 3. Running the Project
-
-Neythaleon provides an interactive, resumable 6-phase CLI wizard for the full ingestion pipeline, as well as a standalone module for pre-ingestion auditing.
-
-#### Full Interactive Pipeline (Audit → Ingest → Dashboard)
-
-The main pipeline uses checkpoints. If interrupted, re-running the script will prompt you to resume from where you left off.
-
-```bash
-# Step 1 — Run the Go profiler once to generate the schema manifest
-go run goSchemeReader/main.go --json ./parquet_files > schema_manifest.json
-
-# Step 2 — Start the interactive orchestrator wizard
-python main.py
-```
-
-#### Integrated Pipeline (Audit → Ingest → Dashboard)
-
-The main pipeline is interactive. Simply follow the prompts to select columns and review cost estimates before confirming the ingestion.
-
-```bash
-# Step 1 — Run the Go profiler once to generate the schema manifest
-go run goSchemeReader/main.go --json ./parquet_files > schema_manifest.json
-
-# Step 2 — Start the interactive orchestrator wizard
-python main.py
-```
-
-#### Quick Inspection Tool (No Database)
-
-If you just want a quick JSON summary of column densities and storage estimates without running the full wizard:
-
-```bash
-python inspect_parquet.py ./parquet_files --json
-```
-
-Leave `INT_COLUMNS` empty in `.env` to let the manifest auto-populate it. Set explicitly to override.
-
----
-
-## Go + Python Integration
-
-The Go tool and Python pipeline share the same manifest format. Run the Go tool once to generate it; all subsequent `python main.py` and `python -m audit` runs load it from disk without rescanning.
-
-```bash
-# Human-readable report (stdout only)
-go run goSchemeReader/main.go ./parquet_files
-
-# JSON manifest (redirect to file)
-go run goSchemeReader/main.go --json ./parquet_files > schema_manifest.json
-```
-
-The manifest drives three things on the Python side:
-
-- **Audit advisor** — column classification, DDL generation, EAV recommendation
-- **Table bootstrap** — `build_schema_df()` maps Go physical types to pandas dtypes, skipping sample-chunk I/O
-- **INT_COLUMNS inference** — `infer_int_columns()` returns `INT32`/`INT64` columns with ≥50% density when `INT_COLUMNS` is not set in `.env`
-
----
-
-## File Structure
-
-```
-Neythaleon/
-├── .env.example                    # copy to .env and edit
-├── main.py                         # orchestrator: audit → ingest → dashboard
-├── requirements.txt
-├── schema_manifest.json            # produced by: go run goSchemeReader/main.go --json <dir>
-│
-├── checkpoint/                    # checkpoint system
-│   └── checkpoint.py              # persists phase state to checkpoint.json
-│
-├── bitarray/                      # bit-array handling
-│   ├── detector.py                # identifies bit-encoded columns
-│   ├── decoder.py                 # unpacks bytes to columns
-│   └── metadata_loader.py         # validates encoding JSON
-│
-├── cost/                          # cost estimation logic
-│   └── calculator.py
-│
-├── selector/                      # column selection system
-│   ├── column_selector.py         # Rich TUI selector
-│   └── recommender.py             # heuristic recommendations
-│
-├── plot/                          # graphing & dashboards
-│   ├── dashboard.py               # performance metrics dashboard
-│   └── user_graphs.py             # data-driven graph wizard
-│
-├── goSchemeReader/                # Go-based fast schema profiler
-│   └── main.go
-```
-
----
-
-## Requirements
-
-- **Python** 3.10+
-- **Go** 1.21+ (for `goSchemeReader`; optional — audit falls back to PyArrow schema scan if Go is unavailable)
-- **PostgreSQL** (not required for audit-only mode)
-
-### Python dependencies
-
-```bash
-pip install -r requirements.txt
-```
-
-Key packages: `pandas`, `pyarrow`, `duckdb`, `sqlalchemy`, `psycopg2-binary`, `shapely`, `psutil`, `matplotlib`, `python-dotenv`
+Requires Go 1.21+ and the Apache Arrow Go module (fetched automatically via `go mod download`).
 
 ---
 
 ## Configuration
 
+Copy `.env.example` to `.env` and fill in your values:
+
 ```bash
 cp .env.example .env
 ```
 
-| Variable                  | Default                       | Description                                                                           |
-| ------------------------- | ----------------------------- | ------------------------------------------------------------------------------------- |
-| `DATABASE_URL`            | _(required for ingest)_       | PostgreSQL connection string                                                          |
-| `DB_TABLE`                | `ingested_data`               | Target table name; created automatically if absent                                    |
-| `PARQUET_DIR`             | `parquet_files`               | Folder containing `.parquet` input files                                              |
-| `FAILED_DIR`              | `failed_chunks`               | Destination for chunk-failure CSVs                                                    |
-| `MEDIA_DIR`               | `media`                       | Output folder for all generated files                                                 |
-| `CHUNK_SIZE`              | `10000`                       | Rows per batch; keep ≤20,000 to avoid OOM warnings                                    |
-| `PARALLELISM`             | `4`                           | `ThreadPoolExecutor` workers for concurrent transforms                                |
-| `VALIDATE_COORDS`         | `false`                       | Coordinate validation hook (reserved; not yet implemented)                            |
-| `INT_COLUMNS`             | _(empty)_                     | Comma-separated columns to coerce to `Int64`; auto-populated from manifest when empty |
-| `MANIFEST_FILE`           | `schema_manifest.json`        | Path to Go manifest; skips sample-chunk inference when present                        |
-| `METRICS_FILE`            | `media/ingestion_metrics.csv` | Append-only metrics log                                                               |
-| `LOG_FILE`                | `ingestion.log`               | File log destination                                                                  |
-| `CPU_THRESHOLD`           | `85`                          | CPU % above which the loop sleeps                                                     |
-| `THROTTLE_DELAY_HIGH_CPU` | `2`                           | Seconds to sleep under high CPU or RAM                                                |
-| `THROTTLE_DELAY`          | `0`                           | Baseline delay between chunks (seconds)                                               |
+| Variable | Description | Example |
+|---|---|---|
+| `DATABASE_URL` | SQLAlchemy-compatible Postgres URL | `postgresql://user:pass@host:5432/db` |
+| `DB_TABLE` | Target table name | `ingested_data` |
+| `PARQUET_DIR` | Path to Parquet files (relative to project root) | `parquet_files` |
+| `FAILED_DIR` | Directory for failed chunk dumps | `failed_chunks` |
+| `MEDIA_DIR` | Output directory for plots and metrics CSV | `media` |
+| `CHUNK_SIZE` | Rows per ingestion chunk | `100000` |
+| `METRICS_FILE` | CSV path for per-chunk metrics | `media/ingestion_metrics.csv` |
+| `LOG_FILE` | Log output path | `ingestion.log` |
+| `CPU_THRESHOLD` | CPU % at which throttling activates | `85` |
+| `RAM_THRESHOLD` | RAM % at which GC + throttle activates | `85.0` |
+| `THROTTLE_DELAY_HIGH_CPU` | Sleep (seconds) when threshold exceeded | `2` |
+| `THROTTLE_DELAY` | Baseline sleep between chunks (0 = off) | `0` |
+| `VALIDATE_COORDS` | Validate geometry coordinates | `false` |
+| `MANIFEST_FILE` | Path to schema manifest JSON | `schema_manifest.json` |
+| `FAIL_FAST` | Abort on first chunk error | `false` |
+| `EXPECTED_THROUGHPUT_RPS` | Used for cost-estimate compute time | `50000` |
+| `GRAPH_SAMPLE_LIMIT` | Max rows sampled for plot generation | `500000` |
+| `TARGET_CHUNK_MB` | Target chunk size in MB <!-- TODO: verify this is used --> | `256` |
+| `INT_COLUMNS` | Comma-separated column names to coerce to `Int64` | `year,individualCount` |
+
+---
+
+## Usage
+
+### 1. Generate the schema manifest (Go)
+
+The manifest is pre-generated at `schema_manifest.json`. To regenerate it from your Parquet directory:
+
+```bash
+# Human-readable report
+go run main.go parquet_files
+
+# JSON manifest (required by the pipeline)
+go run main.go --json parquet_files > schema_manifest.json
+```
+
+### 2. Run the ingestion pipeline
+
+```bash
+python main.py
+```
+> Note: If using git bash
+```
+winpty python3 main.py
+```
+
+The pipeline walks you through the following phases interactively. Each phase can be resumed, overwritten, or aborted if a previous checkpoint exists.
+
+| Phase | Description |
+|---|---|
+| **Column selection** | Choose which columns to ingest via interactive checkbox or comma-separated list |
+| **Bit-array intake** | Detect and resolve packed bit-array columns using a JSON encoding metadata file or auto-lookup |
+| **Cost estimate** | Calculates estimated storage and compute cost before any data is transferred |
+| **Ingestion** | Parallel transform (multi-process) → bulk COPY insert (multi-thread). Press `q` to gracefully stop |
+| **Graph generation** | Generates a performance dashboard PNG and an interactive graph wizard |
+
+> **Storage full handling:** If the database reports a disk-full error (e.g., Neon project size limit), the pipeline pauses and prompts you to **[R]etry**, **[S]kip**, or **[A]bort** before continuing.
+
+### 3. Plot the performance dashboard independently
+
+```bash
+python -m plot.cli
+```
+
+Output is written to `media/dashboard_yellow.png`.
+
+---
+
+## Testing
+
+### Downloading test data
+
+The test dataset is the OBIS H3-level-7 species grid, hosted on a public S3 bucket. Files are downloaded without extensions and must be renamed.
+
+**Windows PowerShell:**
+
+```powershell
+aws s3 cp --recursive s3://obis-products/speciesgrids/h3_7 . --no-sign-request
+
+Get-ChildItem -File -Recurse | Where-Object {
+    $_.Extension -eq ""
+} | Rename-Item -NewName {
+    $_.Name + ".parquet"
+}
+```
+
+**Git Bash (Windows) / Linux / Arch:**
+
+```bash
+aws s3 cp --recursive s3://obis-products/speciesgrids/h3_7 . --no-sign-request
+
+find . -type f ! -name "*.*" -exec bash -c '
+for f; do
+    mv "$f" "$f.parquet"
+done
+' bash {} +
+```
+
+**Safer variant (only rename files inside `h3_7`):**
+
+```bash
+find ./h3_7 -type f ! -name "*.*" -exec bash -c '
+for f; do
+    mv "$f" "$f.parquet"
+done
+' bash {} +
+```
+
+**Verify files are valid Parquet (Linux / Git Bash):**
+
+```bash
+file somefile.parquet
+```
+
+### Running the test suite
+
+```bash
+# Activate the venv first
+venv\Scripts\activate        # Windows
+source venv/bin/activate     # Linux / macOS
+
+python -m pytest tests/
+```
+
+| Test file | Covers |
+|---|---|
+| `test_transform.py` | Null-byte cleaning, special character stripping, integer coercion, WKB→WKT geometry |
+| `test_db_utils.py` | `_prepare_for_copy` — nullable ints, booleans, string escaping |
+| `test_decoder.py` | Bit-array unpacking and null propagation |
+| `test_ingest_runner.py` | Storage-full error handling, interactive prompt logic |
+| `test_scheme_utils.py` | SQL type coercion (int, float, bool, datetime) |
+| `test_metrics.py` | Metric tracking and field normalization |
+| `test_checkpoint.py` | Checkpoint save/load/resume lifecycle |
+| `test_recommender.py` | Column exclusion recommendations by density |
+
+---
+
+## Project structure
+
+```
+Neythaleon/
+├── main.py                  # Pipeline entry point — orchestrates all phases
+├── main.go                  # Go schema scanner — reads Parquet metadata, emits JSON manifest
+├── schema_manifest.json     # Pre-generated schema manifest (commit or regenerate as needed)
+├── .env.example             # Environment variable template
+├── requirements.txt         # Python dependencies
+├── go.mod / go.sum          # Go module files
+│
+├── ingest/
+│   ├── config.py            # Loads all env vars via dotenv
+│   ├── ingest_runner.py     # Core orchestration: process pool → thread pool → COPY insert
+│   ├── db_utils.py          # copy_insert, _prepare_for_copy, schema helpers
+│   ├── transform.py         # Per-chunk data cleaning and type enforcement
+│   ├── parquet_utils.py     # Parquet streaming and schema inference
+│   ├── manifest.py          # Schema manifest loading and column inference
+│   ├── scheme_utils.py      # DataFrame → SQL type coercion
+│   ├── metrics.py           # Per-chunk metrics tracking and CSV persistence
+│   └── logging_config.py    # Logging setup
+│
+├── bitarray/
+│   ├── decoder.py           # Unpacks packed bit columns into individual boolean columns
+│   ├── detector.py          # Identifies bit-array columns from manifest metadata
+│   ├── lookup.py            # Auto-resolution of bit-array encoding definitions
+│   └── metadata_loader.py   # Loads and validates bit-array encoding JSON
+│
+├── checkpoint/
+│   └── checkpoint.py        # Phase-level checkpoint: save, load, resume/overwrite prompt
+│
+├── selector/
+│   ├── column_selector.py   # Interactive column picker (checkbox or manual entry)
+│   └── recommender.py       # Recommends columns to exclude based on data density
+│
+├── cost/
+│   └── calculator.py        # Pre-ingestion cost estimate (storage, network, compute)
+│
+├── plot/
+│   ├── cli.py               # Standalone dashboard entry point
+│   ├── dashboard.py         # Renders 4-panel PNG from metrics CSV
+│   ├── plotting_panels.py   # Individual panel renderers (throughput, CPU, memory, batch time)
+│   ├── metrics_loader.py    # Fuzzy CSV loader for metrics files
+│   └── user_graphs.py       # Interactive graph wizard against the ingested database
+│
+├── tests/                   # pytest test suite (no live DB required)
+├── media/                   # Generated plots and metrics CSV
+├── failed_chunks/           # Parquet dumps of chunks that failed to insert
+└── parquet_files/           # Input data directory
+```
 
 ---
 
 ## License
 
-- Code: MIT
-- Data: CC0 1.0
-
----
-
-> "The sea, once it casts its spell, holds one in its net of wonder forever."
-> — Jacques Cousteau
+MIT License — Copyright (c) 2025 LeeFred3042U. See [LICENSE](LICENSE) for full text.
