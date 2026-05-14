@@ -59,7 +59,7 @@ Follow these steps to set up and run the Neythaleon project locally.
 Clone the repository and set up your Python virtual environment:
 
 ```bash
-git clone <repository-url>
+git clone https://github.com/LeeFred3042U/Neythaleon
 cd Neythaleon
 python -m venv venv
 
