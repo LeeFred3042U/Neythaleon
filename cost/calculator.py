@@ -1,138 +1,144 @@
+import math
+
 from rich.console import Console
-
-from rich.prompt import Prompt
-
 from rich.table import Table as RichTable
-
-from ingest.config import EXPECTED_THROUGHPUT_RPS
 
 console = Console()
 
-DEFAULT_RATES = {
-    "storage_gb_month": 0.023,
-    "network_gb": 0.09,
-    "cpu_hour": 0.048,
-    "ram_gb_hour": 0.006,
+_STORAGE_INR_PER_GB_MONTH: float = 1.90
+_NETWORK_INR_PER_GB: float = 7.50
+
+_UNOPT_BYTES: dict[str, int] = {
+    "INT64": 8,
+    "DOUBLE": 8,
+    "INT32": 4,
+    "FLOAT": 4,
+    "BOOLEAN": 1,
+    "BYTE_ARRAY": 15,
+    "FIXED_LEN_BYTE_ARRAY": 0,
+}
+
+_OPT_BYTES: dict[str, int] = {
+    "INT64": 8,
+    "DOUBLE": 8,
+    "INT32": 4,
+    "FLOAT": 4,
+    "BOOLEAN": 1,
+    "BYTE_ARRAY": 4,
+    "FIXED_LEN_BYTE_ARRAY": 0,
 }
 
 
-def prompt_rates(cached=None):
-
-    rates = dict(DEFAULT_RATES)
-
-    if cached:
-        rates.update(cached)
-
-    console.print(
-        "\n[bold]Cost rate inputs[/bold] (press enter to accept default/cached value)"
-    )
-
-    fields = [
-        ("storage_gb_month", "Storage cost per GB/month (Rupees)"),
-        ("network_gb", "Network transfer cost per GB (Rupees)"),
-        ("cpu_hour", "CPU cost per hour (Rupees)"),
-        ("ram_gb_hour", "RAM cost per GB/hour (Rupees)"),
-    ]
-
-    for key, label in fields:
-        current = rates[key]
-
-        raw = Prompt.ask(f"  {label}", default=str(current))
-
-        try:
-            rates[key] = float(raw)
-
-        except ValueError:
-            console.print(f"  [yellow]Invalid value, using {current}[/yellow]")
-
-    return rates
+def _col_bytes(col_meta: dict, table: dict[str, int]) -> int:
+    ptype = col_meta.get("physical_type", "")
+    if ptype == "FIXED_LEN_BYTE_ARRAY":
+        return col_meta.get("type_length", 0)
+    return table.get(ptype, 8)
 
 
-def calculate_estimate(
-    manifest_raw,
-    selected_columns,
-    rates,
-    expected_throughput_rps=EXPECTED_THROUGHPUT_RPS,
-):
+def calculate_estimate(manifest_raw: dict, selected_columns: list) -> dict:
+    cols_manifest: dict = manifest_raw.get("columns", {})
+    total_rows: int = manifest_raw.get("total_rows", 0)
+    total_size_bytes: int = manifest_raw.get("total_size_bytes", 0)
+    all_col_names = list(cols_manifest.keys())
 
-    storage = manifest_raw.get("storage_estimate_gb", {})
+    sel_set = set(selected_columns)
 
-    total_rows = manifest_raw.get("total_rows", 0)
+    pg_raw_bytes: int = 0
+    pg_opt_bytes: int = 0
+    sel_non_null_bytes: int = 0
+    all_non_null_bytes: int = 0
 
-    parquet_gb = storage.get("parquet_gb", 0.0)
+    for name, meta in cols_manifest.items():
+        non_null = meta.get("total_values", 0) - meta.get("total_nulls", 0)
+        non_null = max(non_null, 0)
 
-    all_cols = list(manifest_raw.get("columns", {}).keys())
+        unopt_w = _col_bytes(meta, _UNOPT_BYTES)
+        opt_w = _col_bytes(meta, _OPT_BYTES)
 
-    col_fraction = len(selected_columns) / max(len(all_cols), 1)
+        col_unopt_bytes = non_null * unopt_w
+        col_opt_bytes = non_null * opt_w
 
-    col_fraction = max(col_fraction, 0.001)
+        all_non_null_bytes += col_unopt_bytes
 
-    pg_opt_gb = storage.get("pg_optimised_gb", 0.0) * col_fraction
+        if name in sel_set:
+            pg_raw_bytes += col_unopt_bytes
+            pg_opt_bytes += col_opt_bytes
+            sel_non_null_bytes += col_unopt_bytes
 
-    pg_unopt_gb = storage.get("pg_unoptimised_gb", 0.0) * col_fraction
+    n_sel = max(len(selected_columns), 1)
+    tuple_overhead = total_rows * (24 + math.ceil(n_sel / 8))
+    pg_raw_bytes += tuple_overhead
+    pg_opt_bytes += tuple_overhead
 
-    parquet_sel_gb = parquet_gb * col_fraction
+    if all_non_null_bytes > 0:
+        col_fraction = sel_non_null_bytes / all_non_null_bytes
+    else:
+        col_fraction = len(selected_columns) / max(len(all_col_names), 1)
 
-    est_hours = (total_rows / max(expected_throughput_rps, 1)) / 3600
+    network_bytes = total_size_bytes * col_fraction
+    network_gb = network_bytes / 1024**3
 
-    ram_gb_estimate = 2.0
+    pg_raw_gb = pg_raw_bytes / 1024**3
+    pg_opt_gb = pg_opt_bytes / 1024**3
 
-    costs = {
-        "storage_optimised_monthly": round(pg_opt_gb * rates["storage_gb_month"], 4),
-        "storage_unoptimised_monthly": round(
-            pg_unopt_gb * rates["storage_gb_month"], 4
-        ),
-        "network_transfer": round(parquet_sel_gb * rates["network_gb"], 4),
-        "compute_cpu": round(est_hours * rates["cpu_hour"], 4),
-        "compute_ram": round(est_hours * ram_gb_estimate * rates["ram_gb_hour"], 4),
-    }
-
-    costs["total_estimate"] = round(sum(costs.values()), 4)
-
-    costs["_meta"] = {
-        "selected_columns": len(selected_columns),
-        "total_columns": len(all_cols),
-        "col_fraction": round(col_fraction, 3),
-        "pg_opt_gb": round(pg_opt_gb, 4),
-        "parquet_selected_gb": round(parquet_sel_gb, 4),
-        "est_compute_hours": round(est_hours, 3),
-    }
+    storage_raw_inr = pg_raw_gb * _STORAGE_INR_PER_GB_MONTH
+    storage_opt_inr = pg_opt_gb * _STORAGE_INR_PER_GB_MONTH
+    network_inr = network_gb * _NETWORK_INR_PER_GB
 
     if total_rows == 0:
         console.print(
-            "[yellow]Warning: total_rows not available — compute estimate is $0.00 (unreliable)[/yellow]"
+            "[yellow]Warning: total_rows not in manifest — storage estimates may be zero.[/yellow]"
         )
 
-    return costs
-
-
-def display_estimate(costs):
-
-    t = RichTable(title="Pre-transfer cost estimate (Rupees)", show_header=True)
-
-    t.add_column("Item")
-
-    t.add_column("Est. Rupees", justify="right")
-
-    labels = {
-        "storage_optimised_monthly": "Storage (Optimised) Monthly",
-        "storage_unoptimised_monthly": "Storage (Unoptimised) Monthly",
-        "network_transfer": "Network Transfer",
-        "compute_cpu": "Compute (CPU)",
-        "compute_ram": "Compute (RAM)",
-        "total_estimate": "Total Estimate",
+    return {
+        "pg_raw_gb": round(pg_raw_gb, 4),
+        "pg_optimised_gb": round(pg_opt_gb, 4),
+        "network_gb": round(network_gb, 4),
+        "storage_raw_inr": round(storage_raw_inr, 4),
+        "storage_optimised_inr": round(storage_opt_inr, 4),
+        "network_inr": round(network_inr, 4),
+        "_meta": {
+            "selected_columns": len(selected_columns),
+            "total_columns": len(all_col_names),
+            "pg_raw_gb": round(pg_raw_gb, 4),
+            "pg_optimised_gb": round(pg_opt_gb, 4),
+            "network_gb": round(network_gb, 4),
+        },
     }
 
-    for key, label in labels.items():
-        t.add_row(label, f"${costs[key]:.4f}")
 
+def display_estimate(costs: dict) -> None:
+    t = RichTable(
+        title="Pre-transfer cost estimate (₹)",
+        show_header=True,
+        header_style="bold magenta",
+        border_style="bright_black",
+    )
+    t.add_column("Item", min_width=32)
+    t.add_column("₹ / month", justify="right", min_width=14)
+
+    rows = [
+        ("Storage — optimised (pg_optimised_gb)", costs["storage_optimised_inr"]),
+        ("Storage — unoptimised (pg_raw_gb)", costs["storage_raw_inr"]),
+        ("Network transfer (egress)", costs["network_inr"]),
+    ]
+
+    for label, inr in rows:
+        t.add_row(label, f"₹{inr:.4f}")
+
+    console.print()
     console.print(t)
 
     m = costs["_meta"]
-
     console.print(
-        f"[dim]Based on {m['selected_columns']}/{m['total_columns']} columns "
-        f"({m['col_fraction'] * 100:.1f}%), "
-        f"~{m['pg_opt_gb']:.3f} GB PG (optimised), "
-        f"~{m['est_compute_hours']:.2f} compute-hours estimated[/dim]"
+        f"[dim]"
+        f"{m['selected_columns']}/{m['total_columns']} columns — "
+        f"PG optimised ~{m['pg_optimised_gb']:.3f} GB, "
+        f"PG raw ~{m['pg_raw_gb']:.3f} GB, "
+        f"network ~{m['network_gb']:.3f} GB"
+        f"[/dim]"
+    )
+    console.print(
+        "[dim italic]Compute cost shown at pipeline exit based on actual runtime.[/dim italic]"
     )

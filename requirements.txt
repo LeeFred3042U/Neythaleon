@@ -12,3 +12,5 @@ tqdm>=4.65.0
 rich>=13.0.0
 questionary>=2.0.0
 pytest>=9.0.3
+anthropic>=0.25.0
+openai>=1.0.0

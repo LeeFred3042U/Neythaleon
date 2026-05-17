@@ -12,6 +12,56 @@ Neythaleon reads partitioned Parquet files (OBIS H3-gridded species grids), lets
 
 ---
 
+## Workflow
+
+```mermaid
+graph TD
+    Start([Start]) --> LoadManifest[Load Schema Manifest]
+    LoadManifest --> SelectCols["1. Column Selection (Picker + Recommendations)"]
+    
+    SelectCols --> BitIntake["2. Bit-Array Intake (Resolve bit-packed columns)"]
+    
+    BitIntake --> CostEst["3. Cost Estimation (Storage & compute projection)"]
+    
+    CostEst --> Confirm{User Confirms?}
+    Confirm -- No --> Abort([End])
+    Confirm -- Yes --> Ingest["4. Bulk Ingestion (Parallel transform & bulk load)"]
+    
+    subgraph "Ingestion Loop (per chunk)"
+    Ingest --> Transform[Transform Data]
+    Transform --> CheckStorage{Storage Full?}
+    CheckStorage -- Yes --> Interaction["Interaction (Retry / Skip / Abort)"]
+    Interaction -- Retry --> Transform
+    CheckStorage -- No --> Copy[SQL COPY]
+    Copy --> Checkpoint[Save Chunk Checkpoint]
+    Checkpoint --> NextChunk{More Chunks?}
+    NextChunk -- Yes --> Ingest
+    end
+    
+    NextChunk -- No --> Graphs["5. Graph Generation (Dashboard + Wizard)"]
+    Graphs --> Done([Done])
+
+    %% Resume logic
+    subgraph "Phase Checkpoints"
+    SelectCols -.-> |Resume/Overwrite| SelectCols
+    BitIntake -.-> |Resume/Overwrite| BitIntake
+    CostEst -.-> |Resume/Overwrite| CostEst
+    Ingest -.-> |Resume/Overwrite| Ingest
+    Graphs -.-> |Resume/Overwrite| Graphs
+    end
+
+    style Start fill:#f9f,stroke:#333,stroke-width:2px
+    style Done fill:#f9f,stroke:#333,stroke-width:2px
+    style SelectCols fill:#e1f5fe,stroke:#01579b
+    style BitIntake fill:#e1f5fe,stroke:#01579b
+    style CostEst fill:#e1f5fe,stroke:#01579b
+    style Ingest fill:#e1f5fe,stroke:#01579b
+    style Graphs fill:#e1f5fe,stroke:#01579b
+    style Interaction fill:#fff9c4,stroke:#fbc02d
+```
+
+---
+
 ## Tech stack
 
 | Layer | Technology |
@@ -32,6 +82,24 @@ Neythaleon reads partitioned Parquet files (OBIS H3-gridded species grids), lets
 python-dotenv, psutil, pandas, duckdb, sqlalchemy, psycopg2-binary,
 shapely, numpy, matplotlib, pyarrow, tqdm, rich, questionary, pytest
 ```
+
+---
+
+## AI Features (Optional)
+
+Neythaleon includes a provider-agnostic AI advisor (`ai_advisor.py`) to assist you during the pipeline using large language models.
+
+- **AI Column Advisor:** Recommends which columns to ingest based on a natural language description of your analysis goals.
+- **AI Graph Advisor:** Suggests meaningful visualisations tailored to the semantics of your selected columns.
+- **AI Query Builder:** Generates safe, read-only PostgreSQL `SELECT` queries from natural language questions.
+
+**Supported Providers:**
+- `anthropic` (requires `pip install anthropic`)
+- `openai` (requires `pip install openai`)
+- `ollama` (local, no SDK required)
+- `openai_compat` (LM Studio, Together, Groq, etc.)
+
+Configure your chosen provider and model using the `.env` variables described in the Configuration section.
 
 ---
 
@@ -91,6 +159,12 @@ cp .env.example .env
 | `GRAPH_SAMPLE_LIMIT` | Max rows sampled for plot generation | `500000` |
 | `TARGET_CHUNK_MB` | Target chunk size in MB <!-- TODO: verify this is used --> | `256` |
 | `INT_COLUMNS` | Comma-separated column names to coerce to `Int64` | `year,individualCount` |
+| `LLM_PROVIDER` | AI provider (`anthropic`, `openai`, `ollama`, `openai_compat`) | `anthropic` |
+| `LLM_MODEL` | AI model to use | `claude-sonnet-4-5` |
+| `ANTHROPIC_API_KEY` | API key for Anthropic | `sk-ant-...` |
+| `OPENAI_API_KEY` | API key for OpenAI / OpenAI-compatible | `sk-proj-...` |
+| `OPENAI_BASE_URL` | Endpoint for `openai_compat` | `http://localhost:1234/v1` |
+| `OLLAMA_MODEL` | Local model name for Ollama | `llama3` |
 
 ---
 
@@ -214,6 +288,7 @@ python -m pytest tests/
 ```
 Neythaleon/
 ├── main.py                  # Pipeline entry point — orchestrates all phases
+├── ai_advisor.py            # AI assistant for column selection, graphing, and SQL querying
 ├── main.go                  # Go schema scanner — reads Parquet metadata, emits JSON manifest
 ├── schema_manifest.json     # Pre-generated schema manifest (commit or regenerate as needed)
 ├── .env.example             # Environment variable template
@@ -262,6 +337,23 @@ Neythaleon/
 
 ---
 
+## Citation
+
+OBIS (2024). speciesgrids (version 0.2.0). Ocean Biodiversity Information System. Intergovernmental Oceanographic Commission of UNESCO. https://doi.org/10.5281/zenodo.19392660
+
+GBIF.org (1 May 2024) GBIF Occurrence Data https://doi.org/10.15468/dl.ubwn8z
+
+OBIS (25 October 2023) OBIS Occurrence Snapshot. Ocean Biodiversity Information System. Intergovernmental Oceanographic Commission of UNESCO. https://obis.org.
+
+World Register of Marine Species. Available from https://www.marinespecies.org at VLIZ. Accessed 2024-05-01. doi:10.14284/170.
+
+IUCN. 2023. The IUCN Red List of Threatened Species. Version 2023-1. https://www.iucnredlist.org. Accessed on 13 May 2024.
+
+Gearty W, Chamberlain S (2022). rredlist: IUCN Red List Client. R package version 0.7.1, https://CRAN.R-project.org/package=rredlist.
+
+
+* GitHub URl <https://github.com/iobis/speciesgrids>
+---
 ## License
 
 MIT License — Copyright (c) 2025 LeeFred3042U. See [LICENSE](LICENSE) for full text.

@@ -29,7 +29,9 @@ from bitarray.metadata_loader import BitArrayMetadata
 
 from bitarray.lookup import attempt_lookup, CONTACT_MESSAGE
 
-from cost.calculator import prompt_rates, calculate_estimate, display_estimate
+from cost.calculator import calculate_estimate, display_estimate
+
+from ingest.runtime_stats import take_snapshot, display_runtime_summary
 
 from plot.cli import main as dashboard_main
 
@@ -37,6 +39,8 @@ console = Console()
 
 
 def main():
+
+    run_start = take_snapshot()
 
     configure_logging()
 
@@ -60,7 +64,7 @@ def main():
 
     bit_metadata = phase_bit_array_intake(selected_columns, manifest_typed, cp)
 
-    phase_cost_estimate(manifest_raw, selected_columns, cp)
+    costs = phase_cost_estimate(manifest_raw, selected_columns, cp)
 
     confirm = Prompt.ask("\n[bold]Proceed with ingestion?[/bold] [Y/n]", default="Y")
 
@@ -74,6 +78,12 @@ def main():
     phase_graphs(selected_columns, manifest_typed, cp)
 
     console.print("\n[bold green]═══ Pipeline complete ═══[/bold green]")
+
+    if costs is not None:
+        try:
+            display_runtime_summary(run_start, take_snapshot(), costs, {})
+        except Exception:
+            logging.exception("Runtime summary failed (non-fatal)")
 
 
 def phase_column_selection(manifest, cp):
@@ -99,7 +109,25 @@ def phase_column_selection(manifest, cp):
             console.print(f"  [dim]• {col}[/dim]")
         console.print()
 
-    selected = run_selector(manifest)
+    console.print("\n[bold]Column selection mode[/bold]")
+    console.print("  [1] AI advisor   [dim](recommends columns based on your goal)[/dim]")
+    console.print("  [2] Manual       [dim](interactive search or paste list)[/dim]\n")
+
+    mode = Prompt.ask("Mode", choices=["1", "2"], default="2")
+
+    selected = None
+
+    if mode == "1":
+        try:
+            from ai_advisor import ai_column_advisor  # noqa: PLC0415
+
+            selected = ai_column_advisor(manifest)
+
+        except Exception:
+            logging.exception("AI column advisor raised unexpectedly — falling back to manual")
+
+    if selected is None:
+        selected = run_selector(manifest)
 
     cp.save("column_selection", {"completed": True, "selected_columns": selected})
 
@@ -202,18 +230,9 @@ def phase_cost_estimate(manifest_raw, selected_columns, cp):
         if costs:
             display_estimate(costs)
 
-        return
+        return costs or None
 
-    cached_rates = None
-
-    state = cp.load("cost_estimate")
-
-    if state:
-        cached_rates = state.get("rates")
-
-    rates = prompt_rates(cached=cached_rates)
-
-    costs = calculate_estimate(manifest_raw, selected_columns, rates)
+    costs = calculate_estimate(manifest_raw, selected_columns)
 
     display_estimate(costs)
 
@@ -221,10 +240,11 @@ def phase_cost_estimate(manifest_raw, selected_columns, cp):
         "cost_estimate",
         {
             "completed": True,
-            "rates": rates,
             "estimate": costs,
         },
     )
+
+    return costs
 
 
 def phase_ingestion(selected_columns, bit_metadata, cp):

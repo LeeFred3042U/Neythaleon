@@ -35,6 +35,8 @@ def decode_bit_array_columns(df, bit_cols, metadata):
 
             continue
 
+        null_mask = _null_mask(raw_series)
+
         for out in output_defs:
             bit_idx = out["bit_index"]
 
@@ -42,8 +44,6 @@ def decode_bit_array_columns(df, bit_cols, metadata):
 
             if bit_idx < unpacked.shape[1]:
                 bool_vals = unpacked[:, bit_idx].astype(bool)
-
-                null_mask = _null_mask(raw_series)
 
                 arr = pd.array(bool_vals, dtype="boolean")
 
@@ -61,32 +61,31 @@ def decode_bit_array_columns(df, bit_cols, metadata):
     return df
 
 
-def _null_mask(series):
-
-    mask = np.zeros(len(series), dtype=bool)
-
-    for i, val in enumerate(series):
-        if pd.isna(val):
-            mask[i] = True
-
-    return mask
+def _null_mask(series: pd.Series) -> np.ndarray:
+    return pd.isna(series).to_numpy()
 
 
-def _unpack_series(series, bit_width):
-
+def _unpack_series(series: pd.Series, bit_width: int) -> np.ndarray:
     byte_count = (bit_width + 7) // 8
+    n = len(series)
 
-    result = np.zeros((len(series), bit_width), dtype=np.uint8)
+    raw_bytes = np.zeros((n, byte_count), dtype=np.uint8)
+    null_mask = _null_mask(series)
+    values = series.to_numpy(dtype=object)
 
-    for i, val in enumerate(series):
-        if pd.isna(val):
-            continue
+    non_null_idx = np.where(~null_mask)[0]
 
+    for i in non_null_idx:
+        val = values[i]
         if isinstance(val, (bytes, bytearray)):
-            b = val[:byte_count].ljust(byte_count, b"\x00")
+            b = val[:byte_count]
+            raw_bytes[i, : len(b)] = np.frombuffer(b, dtype=np.uint8)
 
-            bits = np.unpackbits(np.frombuffer(b, dtype=np.uint8), bitorder="little")
+    flat = raw_bytes.reshape(-1)
+    all_bits = np.unpackbits(flat, bitorder="little")
+    all_bits = all_bits.reshape(n, byte_count * 8)
+    result = all_bits[:, :bit_width]
 
-            result[i] = bits[:bit_width]
+    result[null_mask] = 0
 
-    return result
+    return result.astype(np.uint8)

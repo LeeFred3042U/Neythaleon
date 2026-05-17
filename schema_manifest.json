@@ -3,7 +3,7 @@
   "failed_files": 0,
   "total_rows": 43329607,
   "total_size_bytes": 633355303,
-  "elapsed_sec": 0.020846,
+  "elapsed_sec": 0.0257539,
   "storage_estimate_gb": {
     "parquet_gb": 0.5898580914363265,
     "pg_overhead_gb": 1.0491998698562384,

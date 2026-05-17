@@ -30,11 +30,9 @@ RAM_THRESHOLD = float(os.environ["RAM_THRESHOLD"])
 VALIDATE_COORDS = os.environ.get("VALIDATE_COORDS", "false").lower() == "true"
 MANIFEST_FILE = BASE_DIR / os.environ["MANIFEST_FILE"]
 FAIL_FAST = os.environ["FAIL_FAST"].lower() == "true"
-EXPECTED_THROUGHPUT_RPS = int(os.environ["EXPECTED_THROUGHPUT_RPS"])
 GRAPH_SAMPLE_LIMIT = int(os.environ["GRAPH_SAMPLE_LIMIT"])
 TARGET_CHUNK_MB = int(os.environ.get("TARGET_CHUNK_MB", "256"))
 
-# Parallelism — auto-detected from hardware if not set in .env
 _cpu = os.cpu_count() or 2
 N_TRANSFORM_WORKERS = int(os.environ.get("N_TRANSFORM_WORKERS", str(max(1, _cpu - 1))))
 N_WRITE_THREADS = int(os.environ.get("N_WRITE_THREADS", "4"))
